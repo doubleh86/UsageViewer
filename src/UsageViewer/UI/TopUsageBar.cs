@@ -8,6 +8,11 @@ namespace UsageViewer.UI;
 
 internal sealed record TopBarMetric(string Provider, string Period, string Value, bool NeedsAttention);
 
+internal sealed class TopBarDetailsEventArgs(string? providerId) : EventArgs
+{
+    public string? ProviderId { get; } = providerId;
+}
+
 internal sealed class TopUsageBar : Form
 {
     private readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer { Interval = 150 };
@@ -29,7 +34,7 @@ internal sealed class TopUsageBar : Form
 
     public string DockScreen => GetDockScreen().DeviceName;
     public double DockPosition => _position;
-    public event EventHandler? DetailsRequested;
+    public event EventHandler<TopBarDetailsEventArgs>? DetailsRequested;
     public event EventHandler? PlacementChanged;
 
     protected override bool ShowWithoutActivation => true;
@@ -284,10 +289,36 @@ internal sealed class TopUsageBar : Form
         {
             PlacementChanged?.Invoke(this, EventArgs.Empty);
         }
-        else
+        else if (ClientRectangle.Contains(e.Location) == true)
         {
-            DetailsRequested?.Invoke(this, EventArgs.Empty);
+            string? providerId = GetProviderAt(e.Location);
+            DetailsRequested?.Invoke(this, new TopBarDetailsEventArgs(providerId));
         }
+    }
+
+    private Rectangle GetMetricBounds(int index)
+    {
+        float scale = DeviceDpi / 96f;
+        int left = (int)(26 * scale);
+        int right = Width - (int)(22 * scale);
+        int width = Math.Max(0, right - left);
+        int x = left + width * index / _metrics.Count;
+        int end = left + width * (index + 1) / _metrics.Count;
+
+        return new Rectangle(x, 0, end - x, Height);
+    }
+
+    private string? GetProviderAt(Point point)
+    {
+        for (int index = 0; index < _metrics.Count; index++)
+        {
+            if (GetMetricBounds(index).Contains(point) == true)
+            {
+                return _metrics[index].Provider == "Codex" ? "codex" : "claude";
+            }
+        }
+
+        return null;
     }
 
     protected override void OnMouseCaptureChanged(EventArgs e)
@@ -323,11 +354,12 @@ internal sealed class TopUsageBar : Form
         }
         else
         {
-            int cellWidth = (right - left) / _metrics.Count;
             for (int index = 0; index < _metrics.Count; index++)
             {
                 TopBarMetric metric = _metrics[index];
-                int x = left + index * cellWidth;
+                Rectangle cell = GetMetricBounds(index);
+                int cellWidth = cell.Width;
+                int x = cell.Left;
                 Color brand = metric.Provider == "Codex" ? Color.FromArgb(104, 223, 195) : Color.FromArgb(223, 170, 138);
                 if (metric.Provider == "Codex")
                 {

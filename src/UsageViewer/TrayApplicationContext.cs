@@ -65,9 +65,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _topBar.PlacementChanged += (_, _) => _popup.SetTopBarPlacement(_topBar.DockScreen, _topBar.DockPosition);
         _topBar.LocationChanged += (_, _) => _popup.MoveBelow(_topBar.Bounds);
         _topBar.SizeChanged += (_, _) => _popup.MoveBelow(_topBar.Bounds);
-        _topBar.DetailsRequested += (_, _) =>
+        _topBar.DetailsRequested += (_, args) =>
         {
-            if (_popup.IsDocked == true && (_popup.Visible == true || _popup.JustDeactivated == true))
+            if (args.ProviderId != null)
+            {
+                ShowPopup(new Point(_topBar.Left, _topBar.Top), true, args.ProviderId);
+            }
+            else if (_popup.IsDocked == true && (_popup.Visible == true || _popup.JustDeactivated == true))
             {
                 _popup.Hide();
             }
@@ -238,7 +242,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    private void ShowPopup(Point anchor, bool fromTopBar = false)
+    private void ShowPopup(Point anchor, bool fromTopBar = false, string? providerId = null)
     {
         if (_exiting == true)
         {
@@ -248,7 +252,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         UpdatePopup();
         if (fromTopBar == true)
         {
-            _popup.ShowBelow(_topBar.Bounds);
+            _popup.ShowBelow(_topBar.Bounds, providerId);
         }
         else
         {

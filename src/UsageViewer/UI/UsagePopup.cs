@@ -88,8 +88,15 @@ internal sealed class UsagePopup : Form
         Activate();
     }
 
-    public void ShowBelow(Rectangle bar)
+    public void ShowBelow(Rectangle bar, string? providerId = null)
     {
+        if ((providerId == "codex" || providerId == "claude") &&
+            (_preferences.ShowBoth == true || _preferences.ActiveProvider != providerId))
+        {
+            _preferences = _preferences with { ShowBoth = false, ActiveProvider = providerId };
+            SavePreferences();
+        }
+
         _dockBounds = bar;
         _anchor = new Point(bar.Left + bar.Width / 2, bar.Top);
         FitToScreen();
