@@ -9,6 +9,23 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Length >= 1 && args.Length <= 2 && args[0] == "--claude-statusline")
+        {
+            try
+            {
+                ClaudeUsageStore store = new ClaudeUsageStore(args.Length == 2 ? args[1] : null);
+                string status = store.CaptureAsync(Console.In, CancellationToken.None).GetAwaiter().GetResult();
+                Console.WriteLine(status);
+
+                return 0;
+            }
+            catch (Exception)
+            {
+                // A status-line command must not print private input or interrupt the Claude session.
+                return 1;
+            }
+        }
+
         if (args.Length == 2 && args[0] == "--diagnose")
         {
             return RunDiagnosticAsync(args[1]).GetAwaiter().GetResult();

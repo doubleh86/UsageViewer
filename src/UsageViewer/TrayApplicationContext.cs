@@ -7,12 +7,19 @@ namespace UsageViewer;
 internal sealed class TrayApplicationContext : ApplicationContext
 {
     private readonly CodexUsageClient _client = new CodexUsageClient();
+    private readonly AiInstallationDetector _installationDetector = new AiInstallationDetector();
+    private readonly ClaudeUsageStore _claudeStore = new ClaudeUsageStore();
+    private readonly string _claudeWebCachePath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UsageViewer", "claude-web-usage.json");
     private readonly CancellationTokenSource _shutdown = new CancellationTokenSource();
     private readonly UsagePopup _popup = new UsagePopup();
+    private readonly TopUsageBar _topBar = new TopUsageBar();
     private readonly NotifyIcon _tray;
     private readonly ContextMenuStrip _menu = new ContextMenuStrip();
-    private readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer { Interval = 60_000 };
+    private readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer { Interval = 5_000 };
     private readonly ToolStripItem _refreshMenuItem;
+    private readonly ToolStripMenuItem _topBarMenuItem;
+    private readonly ToolStripMenuItem _alwaysOnTopMenuItem;
     private readonly RegisteredWaitHandle _showRegistration;
     private Icon _icon;
     private UsageSnapshot? _snapshot;
@@ -21,18 +28,58 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private bool _refreshing;
     private bool _exiting;
     private Point? _lastTrayAnchor;
+    private UsageSnapshot? _claudeSnapshot;
+    private string? _claudeError = "한 번 연결하면 자동으로 갱신됩니다.";
+    private bool _claudeStale;
+    private bool _claudeReading;
+    private DateTimeOffset _lastCodexAttempt;
+    private DateTimeOffset _lastClaudeWebRefresh;
+    private ClaudeConnectionWindow? _claudeConnection;
+    private CodexConnectionWindow? _codexConnection;
+    private string? _claudeWebError;
+    private IReadOnlyList<DetectedAiApp> _installed = Array.Empty<DetectedAiApp>();
 
     public TrayApplicationContext(bool showOnStart, EventWaitHandle showSignal)
     {
         _icon = TrayIconFactory.Create(Color.FromArgb(151, 164, 181));
+        _installed = _installationDetector.Detect();
+        _popup.SetDetectedApps(_installed);
         _menu.Items.Add("사용량 보기", null, (_, _) => ShowPopup(_lastTrayAnchor ?? Cursor.Position));
         _refreshMenuItem = _menu.Items.Add("새로고침", null, async (_, _) => await RefreshAsync());
+        _menu.Items.Add("Codex 구독 연결", null, async (_, _) => await ConnectCodexAsync());
+        _menu.Items.Add("Claude 연결 / 계정 확인", null, async (_, _) => await GetClaudeConnection().ConnectAsync());
+        _menu.Items.Add(new ToolStripSeparator());
+        _topBarMenuItem = new ToolStripMenuItem("모니터 상단에 표시") { CheckOnClick = true };
+        _alwaysOnTopMenuItem = new ToolStripMenuItem("항상 가장 앞에 표시") { CheckOnClick = true };
+        _menu.Items.Add(_topBarMenuItem);
+        _menu.Items.Add(_alwaysOnTopMenuItem);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("종료", null, async (_, _) => await ExitAsync());
+        _topBarMenuItem.Click += (_, _) =>
+            _popup.SetWindowOptions(_topBarMenuItem.Checked, _alwaysOnTopMenuItem.Checked);
+        _alwaysOnTopMenuItem.Click += (_, _) =>
+            _popup.SetWindowOptions(_topBarMenuItem.Checked, _alwaysOnTopMenuItem.Checked);
+        _popup.WindowPreferencesChanged += (_, _) => ApplyWindowPreferences();
+        _popup.VisibleChanged += (_, _) => _topBar.SetDetailsOpen(_popup.Visible == true && _popup.IsDocked == true);
+        _topBar.ContextMenuStrip = _menu;
+        _topBar.PlacementChanged += (_, _) => _popup.SetTopBarPlacement(_topBar.DockScreen, _topBar.DockPosition);
+        _topBar.LocationChanged += (_, _) => _popup.MoveBelow(_topBar.Bounds);
+        _topBar.SizeChanged += (_, _) => _popup.MoveBelow(_topBar.Bounds);
+        _topBar.DetailsRequested += (_, _) =>
+        {
+            if (_popup.IsDocked == true && (_popup.Visible == true || _popup.JustDeactivated == true))
+            {
+                _popup.Hide();
+            }
+            else
+            {
+                ShowPopup(new Point(_topBar.Left, _topBar.Top), true);
+            }
+        };
         _tray = new NotifyIcon
         {
             Icon = _icon,
-            Text = "Codex 사용량 · 연결 준비 중",
+            Text = "UsageViewer · Codex / Claude",
             ContextMenuStrip = _menu,
             Visible = true
         };
@@ -52,11 +99,32 @@ internal sealed class TrayApplicationContext : ApplicationContext
         };
         _tray.MouseDown += (_, _) => _lastTrayAnchor = Cursor.Position;
         _popup.RefreshRequested += async (_, _) => await RefreshAsync();
-        _timer.Tick += async (_, _) => await RefreshAsync();
-        _popup.SetState(null, true, null);
+        _popup.CodexConnectRequested += async (_, _) => await ConnectCodexAsync();
+        _popup.ClaudeConnectRequested += async (_, _) =>
+        {
+            _popup.Hide();
+            await GetClaudeConnection().ConnectAsync();
+        };
+        _timer.Tick += async (_, _) =>
+        {
+            if (DateTimeOffset.UtcNow - _lastCodexAttempt >= TimeSpan.FromSeconds(60))
+            {
+                _ = RefreshAsync();
+            }
+
+            if (_claudeConnection != null && DateTimeOffset.UtcNow - _lastClaudeWebRefresh >= TimeSpan.FromSeconds(60))
+            {
+                _lastClaudeWebRefresh = DateTimeOffset.UtcNow;
+                _ = _claudeConnection.RefreshInBackgroundAsync();
+            }
+
+            await ReadClaudeAsync();
+        };
+        UpdatePopup();
 
         // Ensure an invokable UI handle exists before scheduling the first asynchronous read.
         _ = _popup.Handle;
+        ApplyWindowPreferences();
         _showRegistration = ThreadPool.RegisterWaitForSingleObject(showSignal, (_, _) =>
         {
             try
@@ -74,23 +142,28 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }, null, Timeout.Infinite, false);
         _popup.BeginInvoke(new Action(async () =>
         {
+            _timer.Start();
+            Task codexRefresh = RefreshAsync();
+            string profile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                                           "UsageViewer", "ClaudeWebProfile");
+            if (Directory.Exists(profile) == true)
+            {
+                _ = GetClaudeConnection().ResumeInBackgroundAsync();
+            }
+
             if (showOnStart == true)
             {
                 Rectangle area = Screen.PrimaryScreen?.WorkingArea ?? Screen.FromControl(_popup).WorkingArea;
                 ShowPopup(new Point(area.Right - 16, area.Bottom));
             }
 
-            await RefreshAsync();
-            if (_exiting == false)
-            {
-                _timer.Start();
-            }
+            await codexRefresh;
         }));
     }
 
     private Task RefreshAsync()
     {
-        if (_refreshing == true || _exiting == true)
+        if (_refreshing == true || _exiting == true || _codexConnection?.IsConnecting == true)
         {
             return _activeRefresh ?? Task.CompletedTask;
         }
@@ -103,12 +176,30 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private async Task RefreshCoreAsync()
     {
         _refreshing = true;
+        _installed = _installationDetector.Detect();
+        _popup.SetDetectedApps(_installed);
+        _lastCodexAttempt = DateTimeOffset.UtcNow;
         _refreshMenuItem.Enabled = false;
-        _popup.SetState(_snapshot, true, _error);
+        UpdatePopup();
         try
         {
-            _snapshot = await _client.ReadAsync(_shutdown.Token);
-            _error = null;
+            if (_claudeConnection != null)
+            {
+                _lastClaudeWebRefresh = DateTimeOffset.UtcNow;
+                _ = _claudeConnection.RefreshInBackgroundAsync();
+            }
+
+            _ = ReadClaudeAsync();
+            if (_installed.Any(app => app.Id == "codex") == true)
+            {
+                _snapshot = await _client.ReadAsync(_shutdown.Token);
+                _error = null;
+            }
+            else
+            {
+                _snapshot = null;
+                _error = "Codex 설치를 찾지 못했습니다.";
+            }
         }
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested == true)
         {
@@ -129,21 +220,43 @@ internal sealed class TrayApplicationContext : ApplicationContext
             if (_exiting == false)
             {
                 _refreshMenuItem.Enabled = true;
-                _popup.SetState(_snapshot, false, _error);
+                UpdatePopup();
                 UpdateTray();
             }
         }
     }
 
-    private void ShowPopup(Point anchor)
+    private void ApplyWindowPreferences()
+    {
+        PopupPreferences preferences = _popup.Preferences;
+        _topBarMenuItem.Checked = preferences.ShowTopBar;
+        _alwaysOnTopMenuItem.Checked = preferences.AlwaysOnTop;
+        _topBar.ApplyPreferences(preferences);
+        if (preferences.ShowTopBar == false && _popup.IsDocked == true)
+        {
+            _popup.Hide();
+        }
+    }
+
+    private void ShowPopup(Point anchor, bool fromTopBar = false)
     {
         if (_exiting == true)
         {
             return;
         }
 
-        _popup.SetState(_snapshot, _refreshing, _error);
-        _popup.ShowAt(anchor);
+        UpdatePopup();
+        if (fromTopBar == true)
+        {
+            _popup.ShowBelow(_topBar.Bounds);
+        }
+        else
+        {
+            _popup.ShowAt(anchor);
+        }
+
+        _topBar.SetDetailsOpen(fromTopBar);
+        _ = ReadClaudeAsync();
         bool oldSnapshot = _snapshot == null || DateTimeOffset.UtcNow - _snapshot.RetrievedAt >= TimeSpan.FromSeconds(60);
         bool expiredWindow = _snapshot?.Buckets.Any(bucket =>
             (bucket.Primary != null && UsageDisplayHelper.IsExpired(bucket.Primary) == true) ||
@@ -152,6 +265,124 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             _ = RefreshAsync();
         }
+    }
+
+    private async Task ReadClaudeAsync()
+    {
+        if (_claudeReading == true || _exiting == true)
+        {
+            return;
+        }
+
+        _claudeReading = true;
+        try
+        {
+            bool webSource = File.Exists(_claudeWebCachePath);
+            ClaudeUsageStore source = webSource == true ? new ClaudeUsageStore(_claudeWebCachePath) : _claudeStore;
+            ClaudeUsageReadResult result = await source.ReadAsync(_shutdown.Token);
+            _claudeSnapshot = webSource == true ? result.Snapshot with { PlanName = "Claude Web" } : result.Snapshot;
+            _claudeStale = result.IsStale;
+            _claudeError = _claudeWebError;
+        }
+        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested == true)
+        {
+            return;
+        }
+        catch (UsageQueryException exception)
+        {
+            _claudeSnapshot = null;
+            _claudeError = File.Exists(_claudeWebCachePath) == true ? exception.Message :
+                           "한 번 연결하면 자동으로 갱신됩니다.";
+        }
+        catch (Exception)
+        {
+            _claudeError = "Claude 사용량 수신 파일을 읽지 못했습니다. 다음 수신을 기다려 주세요.";
+            _claudeStale = true;
+        }
+        finally
+        {
+            _claudeReading = false;
+            if (_exiting == false)
+            {
+                UpdatePopup();
+                UpdateTray();
+            }
+        }
+    }
+
+    private void UpdatePopup()
+    {
+        _popup.SetState(_snapshot, _refreshing, _error, _claudeSnapshot, _claudeError, _claudeStale);
+        _topBar.SetUsage(_installed, _snapshot, _error, _claudeSnapshot, _claudeError, _claudeStale);
+    }
+
+    private ClaudeConnectionWindow GetClaudeConnection()
+    {
+        if (_claudeConnection == null)
+        {
+            _claudeConnection = new ClaudeConnectionWindow(new ClaudeUsageStore(_claudeWebCachePath));
+            _claudeConnection.UsageReceived += async (_, _) =>
+            {
+                _claudeWebError = null;
+                await ReadClaudeAsync();
+            };
+            _claudeConnection.ConnectionError += (_, message) =>
+            {
+                _claudeWebError = message;
+                _claudeError = message;
+                if (_exiting == false)
+                {
+                    UpdatePopup();
+                }
+            };
+        }
+
+        return _claudeConnection;
+    }
+
+    private async Task ConnectCodexAsync()
+    {
+        _popup.Hide();
+        if (_activeRefresh != null)
+        {
+            await _activeRefresh;
+        }
+
+        if (_exiting == true)
+        {
+            return;
+        }
+
+        if (_codexConnection == null)
+        {
+            _codexConnection = new CodexConnectionWindow(_client);
+            _codexConnection.UsageReceived += (_, snapshot) =>
+            {
+                if (_exiting == true)
+                {
+                    return;
+                }
+
+                _snapshot = snapshot;
+                _error = null;
+                _lastCodexAttempt = DateTimeOffset.UtcNow;
+                UpdatePopup();
+                UpdateTray();
+            };
+            _codexConnection.ConnectionError += (_, error) =>
+            {
+                if (_exiting == true)
+                {
+                    return;
+                }
+
+                _error = error;
+                UpdatePopup();
+                UpdateTray();
+            };
+        }
+
+        await _codexConnection.ConnectAsync(_shutdown.Token);
     }
 
     private void UpdateTray()
@@ -176,9 +407,25 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         Icon previousIcon = _icon;
+        if (_claudeSnapshot != null && _claudeError == null && _claudeStale == false)
+        {
+            List<UsageWindow> claudeWindows = _claudeSnapshot.Buckets
+                .SelectMany(bucket => new[] { bucket.Primary, bucket.Secondary }).OfType<UsageWindow>()
+                .Where(window => UsageDisplayHelper.IsExpired(window) == false).ToList();
+            if (claudeWindows.Count > 0)
+            {
+                double highestClaude = claudeWindows.Max(window => window.UsedPercent);
+                tooltip += $" | Claude {UsageDisplayHelper.FormatPercent(100 - highestClaude)} 남음";
+                if (_snapshot == null || _error != null)
+                {
+                    color = UsageDisplayHelper.GetUsageColor(highestClaude);
+                }
+            }
+        }
+
         _icon = TrayIconFactory.Create(color);
         _tray.Icon = _icon;
-        _tray.Text = tooltip;
+        _tray.Text = tooltip.Length > 127 ? tooltip.Substring(0, 127) : tooltip;
         previousIcon.Dispose();
     }
 
@@ -193,9 +440,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _timer.Stop();
         _shutdown.Cancel();
         _popup.Hide();
+        _topBar.CloseForExit();
         if (_activeRefresh != null)
         {
             await _activeRefresh;
+        }
+
+        if (_codexConnection?.ActiveConnection != null)
+        {
+            await _codexConnection.ActiveConnection;
         }
 
         _tray.Visible = false;
@@ -214,6 +467,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _menu.Dispose();
             _icon.Dispose();
             _popup.Dispose();
+            _topBar.Dispose();
+            _claudeConnection?.Dispose();
+            _codexConnection?.Dispose();
             _shutdown.Dispose();
         }
 

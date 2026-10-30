@@ -11,4 +11,13 @@
     <Version>0.1.0</Version>
     <Description>Codex 사용량 트레이 표시기</Description>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4314.35" />
+    <EmbeddedResource Include="UI\Popup.html" />
+  </ItemGroup>
+  <Target Name="ExcludeUnusedWebViewWpf" BeforeTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="'%(Reference.Filename)' == 'Microsoft.Web.WebView2.Wpf'" />
+    </ItemGroup>
+  </Target>
 </Project>

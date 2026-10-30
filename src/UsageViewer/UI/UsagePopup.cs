@@ -1,185 +1,427 @@
+using System.Drawing.Drawing2D;
+using System.Globalization;
+using System.Text.Json;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.WinForms;
 using UsageViewer.Models;
+using UsageViewer.Services;
 
 namespace UsageViewer.UI;
 
+internal sealed record ProviderUsageState(string Name, UsageSnapshot? Snapshot, string? Error, bool IsStale = false);
+
 internal sealed class UsagePopup : Form
 {
-    private readonly Label _planLabel;
-    private readonly Label _statusLabel;
-    private readonly Label _noticeLabel;
-    private readonly FlowLayoutPanel _cards;
-    private readonly Button _refreshButton;
-    private readonly Color _muted = Color.FromArgb(151, 164, 181);
+    private readonly WebView2 _browser = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = Color.FromArgb(23, 29, 37) };
+    private readonly PopupPreferencesStore _preferencesStore;
+    private readonly string _profilePath;
+    private PopupPreferences _preferences;
+    private IReadOnlyList<DetectedAiApp> _detected = Array.Empty<DetectedAiApp>();
+    private ProviderUsageState _codex = new ProviderUsageState("Codex", null, null);
+    private ProviderUsageState _claude = new ProviderUsageState("Claude", null, "한 번 연결하면 자동으로 갱신됩니다.");
     private bool _allowClose;
+    private bool _ready;
+    private bool _initializing;
+    private bool _disposed;
+    private bool _refreshing;
+    private string? _preferencesError;
+    private int _contentHeight = 240;
     private long _lastDeactivatedAt = -1000;
     private Point? _anchor;
+    private Rectangle? _dockBounds;
 
     public bool JustDeactivated => Environment.TickCount64 - _lastDeactivatedAt < 300;
-
+    public bool IsDocked => _dockBounds.HasValue;
+    public PopupPreferences Preferences => _preferences;
     public event EventHandler? RefreshRequested;
+    public event EventHandler? ClaudeConnectRequested;
+    public event EventHandler? CodexConnectRequested;
+    public event EventHandler? WindowPreferencesChanged;
 
-    public UsagePopup()
+    public UsagePopup(PopupPreferencesStore? preferencesStore = null, string? profilePath = null)
     {
-        Text = "Codex 사용량 · UsageViewer";
-        AutoScaleDimensions = new SizeF(96, 96);
+        _preferencesStore = preferencesStore ?? new PopupPreferencesStore();
+        _profilePath = profilePath ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                                                  "UsageViewer", "PopupProfile");
+        _preferences = _preferencesStore.Load();
+        Text = "AI 사용량 · UsageViewer";
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(392, 580);
+        AutoScaleDimensions = new SizeF(96, 96);
+        ClientSize = new Size(_preferences.ShowBoth == true ? 320 : 280, _contentHeight);
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
         ShowInTaskbar = false;
-        TopMost = true;
-        KeyPreview = true;
-        BackColor = Color.FromArgb(20, 25, 32);
-        ForeColor = Color.FromArgb(239, 243, 249);
-        Padding = new Padding(1);
-
-        Panel header = new Panel { Dock = DockStyle.Top, Size = new Size(392, 104) };
-        Label logo = CreateLabel("C", 22, 20, 42, 43, 22, FontStyle.Bold);
-        logo.ForeColor = Color.FromArgb(111, 226, 192);
-        Label title = CreateLabel("Codex", 73, 16, 210, 33, 20, FontStyle.Bold);
-        Label subtitle = CreateLabel("USAGE MONITOR", 75, 53, 220, 20, 8, FontStyle.Bold);
-        subtitle.ForeColor = _muted;
-        _planLabel = CreateLabel("계정 확인 중", 24, 80, 300, 20, 9);
-        _planLabel.ForeColor = _muted;
-        Button hideButton = CreateButton("×", 42, 36);
-        hideButton.Location = new Point(328, 17);
-        hideButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        hideButton.AccessibleName = "팝업 닫기";
-        hideButton.Click += (_, _) => Hide();
-        header.Controls.AddRange(new Control[] { logo, title, subtitle, _planLabel, hideButton });
-
-        Panel footer = new Panel { Dock = DockStyle.Bottom, Height = 94 };
-        TableLayoutPanel footerLayout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            Padding = new Padding(22, 6, 22, 16),
-            ColumnCount = 1,
-            RowCount = 2
-        };
-        footerLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        footerLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
-        footerLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        _statusLabel = CreateLabel("연결 준비 중", 24, 8, 344, 20, 8.5f);
-        _statusLabel.ForeColor = _muted;
-        _refreshButton = CreateButton("새로고침", 344, 38);
-        _statusLabel.Dock = DockStyle.Fill;
-        _statusLabel.Margin = Padding.Empty;
-        _refreshButton.Dock = DockStyle.Fill;
-        _refreshButton.Margin = Padding.Empty;
-        _refreshButton.TextAlign = ContentAlignment.MiddleCenter;
-        _refreshButton.Click += (_, _) => RefreshRequested?.Invoke(this, EventArgs.Empty);
-        footerLayout.Controls.Add(_statusLabel, 0, 0);
-        footerLayout.Controls.Add(_refreshButton, 0, 1);
-        footer.Controls.Add(footerLayout);
-
-        _noticeLabel = new Label
-        {
-            Dock = DockStyle.Bottom,
-            Height = 70,
-            Padding = new Padding(24, 4, 24, 0),
-            ForeColor = Color.FromArgb(241, 195, 111),
-            Font = new Font("Segoe UI", 9),
-            Visible = false
-        };
-        _cards = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.TopDown,
-            WrapContents = false,
-            AutoScroll = true,
-            Padding = new Padding(22, 14, 22, 0)
-        };
-        _cards.SizeChanged += (_, _) => ResizeCards();
-        Controls.Add(_cards);
-        Controls.Add(_noticeLabel);
-        Controls.Add(footer);
-        Controls.Add(header);
+        TopMost = _preferences.AlwaysOnTop;
+        BackColor = Color.FromArgb(23, 29, 37);
+        Controls.Add(_browser);
         Deactivate += (_, _) =>
         {
             _lastDeactivatedAt = Environment.TickCount64;
             Hide();
         };
-        KeyDown += (_, args) =>
-        {
-            if (args.KeyCode == Keys.Escape)
-            {
-                Hide();
-            }
-        };
     }
 
-    public void SetState(UsageSnapshot? snapshot, bool refreshing, string? error)
+    public void SetDetectedApps(IReadOnlyList<DetectedAiApp> apps)
     {
-        SuspendLayout();
-        _cards.SuspendLayout();
-        foreach (Control control in _cards.Controls.Cast<Control>().ToArray())
-        {
-            _cards.Controls.Remove(control);
-            control.Dispose();
-        }
+        _detected = apps;
+        UpdateDocument();
+    }
 
-        _refreshButton.Enabled = refreshing == false;
-        _refreshButton.Text = refreshing == true ? "조회 중…" : "새로고침";
-        _noticeLabel.Visible = snapshot != null && error != null;
-        _noticeLabel.Text = error;
-        if (snapshot == null)
-        {
-            _planLabel.Text = "ChatGPT 계정 사용 한도";
-            AddEmptyState(refreshing, error);
-            _statusLabel.Text = refreshing == true ? "Codex에 연결하고 있습니다" : "연결 상태를 확인해 주세요";
-        }
-        else
-        {
-            _planLabel.Text = $"{snapshot.PlanName} 플랜 · 사용 한도";
-            foreach (UsageBucket bucket in snapshot.Buckets)
-            {
-                if (bucket.Primary != null)
-                {
-                    AddCard(bucket.Name, "기본 한도", bucket.Primary, error != null);
-                }
-
-                if (bucket.Secondary != null)
-                {
-                    AddCard(bucket.Name, "추가 한도", bucket.Secondary, error != null);
-                }
-
-                CreditCard creditCard = new CreditCard(bucket.Name, bucket.Credits, error != null)
-                {
-                    Height = (int)(122 * DeviceDpi / 96f),
-                    Margin = new Padding(0, 0, 0, (int)(12 * DeviceDpi / 96f))
-                };
-                _cards.Controls.Add(creditCard);
-            }
-
-            string updatedAt = snapshot.RetrievedAt.ToLocalTime().ToString("HH:mm:ss");
-            _statusLabel.Text = refreshing == true ? "최신 사용량 조회 중…" : $"{updatedAt} 확인 · 60초마다 자동 갱신";
-            if (error != null)
-            {
-                _statusLabel.Text = $"조회 실패 · 마지막 성공 {updatedAt}";
-            }
-        }
-
-        _statusLabel.ForeColor = error == null ? _muted : Color.FromArgb(241, 195, 111);
-        _cards.ResumeLayout(true);
-        ResumeLayout(true);
-        ResizeCards();
-        FitToScreen();
+    public void SetState(UsageSnapshot? snapshot, bool refreshing, string? error, UsageSnapshot? claude = null,
+                         string? claudeError = null, bool claudeStale = false)
+    {
+        _codex = new ProviderUsageState("Codex", snapshot, error);
+        _claude = new ProviderUsageState("Claude", claude, claudeError, claudeStale);
+        _refreshing = refreshing;
+        UpdateDocument();
     }
 
     public void ShowAt(Point anchor)
     {
+        _dockBounds = null;
         _anchor = anchor;
         FitToScreen();
+        UpdateWindowRegion();
+        UpdateDocument();
         Show();
-        // Showing on a different monitor can change DPI and therefore the final popup dimensions.
         FitToScreen();
         Activate();
+    }
+
+    public void ShowBelow(Rectangle bar)
+    {
+        _dockBounds = bar;
+        _anchor = new Point(bar.Left + bar.Width / 2, bar.Top);
+        FitToScreen();
+        UpdateWindowRegion();
+        UpdateDocument();
+        Show();
+        FitToScreen();
+        Activate();
+    }
+
+    public void MoveBelow(Rectangle bar)
+    {
+        if (_dockBounds.HasValue == true)
+        {
+            _dockBounds = bar;
+            _anchor = new Point(bar.Left + bar.Width / 2, bar.Top);
+            FitToScreen();
+        }
+    }
+
+    public void SetWindowOptions(bool showTopBar, bool alwaysOnTop)
+    {
+        bool changed = _preferences.ShowTopBar != showTopBar || _preferences.AlwaysOnTop != alwaysOnTop;
+        _preferences = _preferences with { ShowTopBar = showTopBar, AlwaysOnTop = alwaysOnTop };
+        if (TopMost != alwaysOnTop)
+        {
+            TopMost = alwaysOnTop;
+        }
+
+        SavePreferences();
+        if (changed == true)
+        {
+            WindowPreferencesChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        UpdateDocument();
+    }
+
+    public void SetTopBarPlacement(string screen, double position)
+    {
+        double normalized = Math.Clamp(position, 0, 1);
+        bool changed = _preferences.TopBarScreen != screen || _preferences.TopBarPosition != normalized;
+        _preferences = _preferences with { TopBarScreen = screen, TopBarPosition = normalized };
+        SavePreferences();
+        if (changed == true)
+        {
+            WindowPreferencesChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        UpdateDocument();
     }
 
     public void CloseForExit()
     {
         _allowClose = true;
         Close();
+    }
+
+    protected override async void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        if (_ready == true || _initializing == true)
+        {
+            return;
+        }
+
+        _initializing = true;
+        try
+        {
+            CoreWebView2Environment environment = await CoreWebView2Environment.CreateAsync(userDataFolder: _profilePath);
+            await _browser.EnsureCoreWebView2Async(environment);
+            if (_disposed == true)
+            {
+                return;
+            }
+
+            _browser.CoreWebView2.WebMessageReceived += OnWebMessage;
+            _browser.CoreWebView2.NavigationStarting += (_, args) =>
+            {
+                // Allow NavigateToString's initial internal navigation, then keep the popup on its local document.
+                args.Cancel = _ready;
+            };
+            _browser.CoreWebView2.NavigationCompleted += (_, args) =>
+            {
+                if (args.IsSuccess == true && _browser.CoreWebView2.Source == "about:blank")
+                {
+                    _ready = true;
+                    UpdateDocument();
+                }
+            };
+            _browser.CoreWebView2.NewWindowRequested += (_, args) => args.Handled = true;
+            using Stream stream = typeof(UsagePopup).Assembly.GetManifestResourceStream("UsageViewer.UI.Popup.html")!;
+            using StreamReader reader = new StreamReader(stream);
+            string html = await reader.ReadToEndAsync();
+            _browser.NavigateToString(html);
+        }
+        catch (Exception)
+        {
+            if (_disposed == false)
+            {
+                _browser.Visible = false;
+                Controls.Add(new Label
+                {
+                    Text = "팝업을 표시하려면 Microsoft Edge WebView2 Runtime이 필요합니다.",
+                    Dock = DockStyle.Fill,
+                    ForeColor = Color.White,
+                    Padding = new Padding(16)
+                });
+            }
+        }
+        finally
+        {
+            _initializing = false;
+        }
+    }
+
+    private void OnWebMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs args)
+    {
+        if (_disposed == true || args.Source != "about:blank")
+        {
+            return;
+        }
+
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(args.WebMessageAsJson);
+            JsonElement root = document.RootElement;
+            string? type = root.GetProperty("type").GetString();
+            switch (type)
+            {
+                case "ready":
+                    _ready = true;
+                    UpdateDocument();
+                    break;
+                case "resize":
+                    if (root.TryGetProperty("height", out JsonElement height) == true &&
+                        height.TryGetInt32(out int value) == true && value >= 90 && value <= 2000)
+                    {
+                        _contentHeight = value;
+                        FitToScreen();
+                    }
+                    break;
+                case "mode":
+                    _preferences = _preferences with { ShowBoth = root.GetProperty("showBoth").GetBoolean() };
+                    SavePreferences();
+                    FitToScreen();
+                    UpdateDocument();
+                    break;
+                case "provider":
+                    string? id = root.GetProperty("id").GetString();
+                    if (id != null && (_detected.Any(app => app.Id == id) == true || id == "codex" || id == "claude"))
+                    {
+                        _preferences = _preferences with { ActiveProvider = id };
+                        SavePreferences();
+                        UpdateDocument();
+                    }
+                    break;
+                case "refresh":
+                    RefreshRequested?.Invoke(this, EventArgs.Empty);
+                    break;
+                case "connect":
+                    if (root.TryGetProperty("id", out JsonElement provider) == true && provider.GetString() == "codex")
+                    {
+                        CodexConnectRequested?.Invoke(this, EventArgs.Empty);
+                    }
+                    else if (provider.ValueKind == JsonValueKind.String && provider.GetString() == "claude")
+                    {
+                        ClaudeConnectRequested?.Invoke(this, EventArgs.Empty);
+                    }
+                    break;
+                case "hide":
+                    Hide();
+                    break;
+            }
+        }
+        catch (Exception exception) when (exception is JsonException || exception is InvalidOperationException ||
+                                          exception is KeyNotFoundException)
+        {
+        }
+    }
+
+    private void SavePreferences()
+    {
+        _preferencesError = _preferencesStore.Save(_preferences) == true ? null : "보기 설정을 저장하지 못했습니다.";
+    }
+
+    private async void UpdateDocument()
+    {
+        if (_ready == false || _disposed == true || _browser.CoreWebView2?.Source != "about:blank")
+        {
+            return;
+        }
+
+        try
+        {
+            string json = JsonSerializer.Serialize(BuildDocumentState());
+            await _browser.ExecuteScriptAsync("window.usageViewer.update(" + json + ");");
+        }
+        catch (Exception exception) when (exception is InvalidOperationException || exception is ObjectDisposedException ||
+                                          exception is System.Runtime.InteropServices.COMException)
+        {
+        }
+    }
+
+    private object BuildDocumentState()
+    {
+        List<DetectedAiApp> visible = _detected.ToList();
+        if (_codex.Snapshot != null && visible.Any(app => app.Id == "codex") == false)
+        {
+            visible.Insert(0, new DetectedAiApp("codex", "Codex", true));
+        }
+
+        if (_claude.Snapshot != null && visible.Any(app => app.Id == "claude") == false)
+        {
+            visible.Add(new DetectedAiApp("claude", "Claude", true));
+        }
+
+        List<object> providers = new List<object>();
+        foreach (DetectedAiApp app in visible)
+        {
+            ProviderUsageState state = app.Id == "codex" ? _codex : _claude;
+            UsageSnapshot? snapshot = app.UsageSupported == true ? state.Snapshot : null;
+            List<object> windows = new List<object>();
+            if (snapshot != null)
+            {
+                foreach (UsageBucket bucket in snapshot.Buckets)
+                {
+                    foreach (UsageWindow window in new[] { bucket.Primary, bucket.Secondary }.OfType<UsageWindow>())
+                    {
+                        string name = UsageDisplayHelper.FormatWindow(window.DurationMinutes, "사용 한도");
+                        if (snapshot.Buckets.Count > 1)
+                        {
+                            name = bucket.Name + " · " + name;
+                        }
+
+                        windows.Add(new
+                        {
+                            name,
+                            shortName = name.Replace(" 한도", ""),
+                            remaining = window.RemainingPercent,
+                            expired = UsageDisplayHelper.IsExpired(window),
+                            resetText = UsageDisplayHelper.FormatReset(window)
+                        });
+                    }
+                }
+            }
+
+            CreditBalance? credits = snapshot?.Buckets.FirstOrDefault()?.Credits;
+            string? balance = app.Id != "codex" || snapshot == null ? null :
+                              credits?.Unlimited == true ? "무제한" :
+                              credits?.Balance?.ToString("#,0.##", CultureInfo.InvariantCulture) ??
+                              (credits?.HasCredits == false ? "잔액 없음" : "미제공");
+            providers.Add(new
+            {
+                id = app.Id,
+                name = app.Name,
+                supported = app.UsageSupported,
+                canConnect = (app.Id == "codex" || app.Id == "claude") && (snapshot == null || state.Error != null),
+                plan = app.Id == "codex" ? CultureInfo.InvariantCulture.TextInfo.ToTitleCase(snapshot?.PlanName ??
+                       (state.Error == null ? "조회 중" : "연결 확인")) :
+                       app.Id == "claude" ? (snapshot == null ? "연결 필요" : "마지막 수신") : "감지됨",
+                windows,
+                credits = balance,
+                error = app.UsageSupported == true ? state.Error : "감지됨 · 사용량 연동 미지원",
+                stale = app.UsageSupported == true && (state.IsStale == true || state.Error != null),
+                updated = snapshot?.RetrievedAt.ToLocalTime().ToString("HH:mm")
+            });
+        }
+
+        return new
+        {
+            showBoth = _preferences.ShowBoth,
+            docked = _dockBounds.HasValue,
+            activeProvider = _preferences.ActiveProvider,
+            providers,
+            refreshing = _refreshing,
+            preferencesError = _preferencesError
+        };
+    }
+
+    private void FitToScreen()
+    {
+        float scale = DeviceDpi / 96f;
+        Screen screen = _anchor.HasValue == true ? Screen.FromPoint(_anchor.Value) : Screen.FromControl(this);
+        Rectangle work = screen.WorkingArea;
+        int width = _dockBounds.HasValue == true ? 264 : _preferences.ShowBoth == true ? 320 : 280;
+        ClientSize = new Size(Math.Min((int)(width * scale), work.Width - 24),
+                              Math.Min((int)(_contentHeight * scale), work.Height - (int)(24 * scale)));
+        if (_anchor.HasValue == true)
+        {
+            Location = _dockBounds.HasValue == true ? PopupPlacementHelper.CalculateBelow(work, Size, _dockBounds.Value) :
+                       PopupPlacementHelper.Calculate(work, Size, (int)(12 * scale));
+        }
+    }
+
+    protected override void OnSizeChanged(EventArgs e)
+    {
+        base.OnSizeChanged(e);
+        UpdateWindowRegion();
+    }
+
+    private void UpdateWindowRegion()
+    {
+        if (Width <= 0 || Height <= 0)
+        {
+            return;
+        }
+
+        float radius = 12 * DeviceDpi / 96f;
+        using GraphicsPath path = new GraphicsPath();
+        float diameter = Math.Min(radius * 2, Math.Min(Width, Height));
+        if (_dockBounds.HasValue == true)
+        {
+            path.AddLine(0, 0, Width, 0);
+        }
+        else
+        {
+            path.AddArc(0, 0, diameter, diameter, 180, 90);
+            path.AddArc(Width - diameter, 0, diameter, diameter, 270, 90);
+        }
+        path.AddArc(Width - diameter, Height - diameter, diameter, diameter, 0, 90);
+        path.AddArc(0, Height - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        Region? previous = Region;
+        Region = new Region(path);
+        previous?.Dispose();
+    }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        FitToScreen();
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -193,108 +435,14 @@ internal sealed class UsagePopup : Form
         base.OnFormClosing(e);
     }
 
-    protected override void OnPaint(PaintEventArgs e)
+    protected override void Dispose(bool disposing)
     {
-        base.OnPaint(e);
-        using Pen border = new Pen(Color.FromArgb(57, 66, 79));
-        e.Graphics.DrawRectangle(border, 0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
-    }
-
-    protected override void OnDpiChanged(DpiChangedEventArgs e)
-    {
-        base.OnDpiChanged(e);
-        FitToScreen();
-        ResizeCards();
-    }
-
-    private Label CreateLabel(string text, int x, int y, int width, int height, float fontSize,
-                               FontStyle fontStyle = FontStyle.Regular)
-    {
-        return new Label
+        _disposed = true;
+        if (disposing == true)
         {
-            Text = text,
-            Location = new Point(x, y),
-            Size = new Size(width, height),
-            Font = new Font("Segoe UI", fontSize, fontStyle),
-            AutoEllipsis = true,
-            UseMnemonic = false
-        };
-    }
-
-    private Button CreateButton(string text, int width, int height)
-    {
-        Button button = new Button
-        {
-            Text = text,
-            Size = new Size(width, height),
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(37, 45, 56),
-            ForeColor = ForeColor,
-            Font = new Font("Segoe UI", 10),
-            Cursor = Cursors.Hand,
-            UseVisualStyleBackColor = false
-        };
-        button.FlatAppearance.BorderSize = 0;
-        button.FlatAppearance.MouseOverBackColor = Color.FromArgb(49, 61, 75);
-
-        return button;
-    }
-
-    private void AddCard(string bucketName, string fallback, UsageWindow window, bool isStale)
-    {
-        string name = UsageDisplayHelper.FormatWindow(window.DurationMinutes, fallback);
-        UsageCard card = new UsageCard(bucketName, name, window, isStale)
-        {
-            Height = (int)(184 * DeviceDpi / 96f),
-            Margin = new Padding(0, 0, 0, (int)(12 * DeviceDpi / 96f))
-        };
-        _cards.Controls.Add(card);
-    }
-
-    private void AddEmptyState(bool refreshing, string? error)
-    {
-        float scale = DeviceDpi / 96f;
-        Label title = new Label
-        {
-            Text = refreshing == true ? "사용량을 가져오는 중" : "연결을 확인해 주세요",
-            Font = new Font("Segoe UI", 15, FontStyle.Bold),
-            Height = (int)(52 * scale),
-            Padding = new Padding(0, (int)(12 * scale), 0, 0),
-            UseMnemonic = false
-        };
-        Label message = new Label
-        {
-            Text = error ?? "이 PC에 로그인된 Codex 계정의\n사용량과 초기화 시각을 확인합니다.",
-            Font = new Font("Segoe UI", 10),
-            ForeColor = _muted,
-            Height = (int)(110 * scale),
-            UseMnemonic = false
-        };
-        _cards.Controls.Add(title);
-        _cards.Controls.Add(message);
-    }
-
-    private void ResizeCards()
-    {
-        int width = Math.Max(1, _cards.ClientSize.Width - _cards.Padding.Horizontal);
-        foreach (Control card in _cards.Controls)
-        {
-            card.Width = width;
+            _browser.Dispose();
         }
-    }
 
-    private void FitToScreen(Screen? screen = null)
-    {
-        float scale = DeviceDpi / 96f;
-        Screen targetScreen = screen ?? (_anchor.HasValue == true ? Screen.FromPoint(_anchor.Value) : Screen.FromControl(this));
-        Rectangle area = targetScreen.WorkingArea;
-        int cardHeight = _cards.Controls.Count == 0 ? (int)(240 * scale) :
-                         _cards.Controls.Cast<Control>().Sum(control => control.Height + control.Margin.Vertical);
-        int desiredHeight = (int)(222 * scale) + cardHeight + (_noticeLabel.Visible == true ? _noticeLabel.Height : 0);
-        Height = Math.Min(Math.Max((int)(410 * scale), desiredHeight), area.Height - (int)(24 * scale));
-        if (_anchor.HasValue == true)
-        {
-            Location = PopupPlacementHelper.Calculate(area, Size, (int)(12 * scale));
-        }
+        base.Dispose(disposing);
     }
 }
