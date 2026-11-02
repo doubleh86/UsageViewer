@@ -18,6 +18,7 @@ internal sealed class TopUsageBar : Form
     private readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer { Interval = 150 };
     private readonly Font _textFont = new Font("Segoe UI", 9.75f);
     private readonly List<TopBarMetric> _metrics = new List<TopBarMetric>();
+    private readonly Dictionary<string, UsageAlertLevel> _alertLevels = new Dictionary<string, UsageAlertLevel>();
     private bool _enabled;
     private bool _detailsOpen;
     private bool _pressed;
@@ -34,6 +35,7 @@ internal sealed class TopUsageBar : Form
 
     public string DockScreen => GetDockScreen().DeviceName;
     public double DockPosition => _position;
+    public bool IsFullScreen => _fullScreen;
     public event EventHandler<TopBarDetailsEventArgs>? DetailsRequested;
     public event EventHandler? PlacementChanged;
 
@@ -72,6 +74,9 @@ internal sealed class TopUsageBar : Form
                          UsageSnapshot? claude, string? claudeError, bool claudeStale)
     {
         _metrics.Clear();
+        _alertLevels.Clear();
+        SetAlertLevel("Codex", codex, codexError, false);
+        SetAlertLevel("Claude", claude, claudeError, claudeStale);
         if (codex != null || installed.Any(app => app.Id == "codex") == true)
         {
             _metrics.Add(CreateMetric("Codex", codex, codexError, false));
@@ -86,6 +91,19 @@ internal sealed class TopUsageBar : Form
                          string.Join(" / ", _metrics.Select(metric =>
                              $"{metric.Provider} {metric.Period} {metric.Value}"));
         Invalidate();
+    }
+
+    private void SetAlertLevel(string provider, UsageSnapshot? snapshot, string? error, bool stale)
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        if (UsageAlertPolicy.IsFresh(snapshot, error, stale, now) == false)
+        {
+            return;
+        }
+
+        _alertLevels[provider] = snapshot!.Buckets.SelectMany(bucket => new[] { bucket.Primary, bucket.Secondary })
+            .OfType<UsageWindow>().Select(window => UsageAlertPolicy.GetLevel(window, now))
+            .DefaultIfEmpty(UsageAlertLevel.None).Max();
     }
 
     public void SetDetailsOpen(bool open)
@@ -120,6 +138,11 @@ internal sealed class TopUsageBar : Form
         List<UsageWindow> windows = snapshot.Buckets.SelectMany(bucket => new[] { bucket.Primary, bucket.Secondary })
             .OfType<UsageWindow>().ToList();
         UsageWindow? window = windows.FirstOrDefault(item => UsageDisplayHelper.IsExpired(item) == false);
+        if (_alertLevels.TryGetValue(provider, out UsageAlertLevel level) == true && level != UsageAlertLevel.None)
+        {
+            window = windows.Where(item => UsageAlertPolicy.GetLevel(item, DateTimeOffset.UtcNow) != UsageAlertLevel.None)
+                .OrderBy(item => item.RemainingPercent).FirstOrDefault() ?? window;
+        }
         if (window == null)
         {
             return new TopBarMetric(provider, "", windows.Count == 0 ? "한도 미제공" : "갱신 필요", true);
@@ -342,7 +365,8 @@ internal sealed class TopUsageBar : Form
         base.OnPaint(e);
         float scale = DeviceDpi / 96f;
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using Pen border = new Pen(Color.FromArgb(59, 70, 85));
+        bool lowUsage = _alertLevels.Values.Any(level => level != UsageAlertLevel.None);
+        using Pen border = new Pen(lowUsage == true ? Color.FromArgb(214, 92, 106) : Color.FromArgb(59, 70, 85));
         using GraphicsPath outline = CreateShape(0.5f);
         e.Graphics.DrawPath(border, outline);
         DrawGrip(e.Graphics, 10 * scale, scale);
@@ -360,6 +384,14 @@ internal sealed class TopUsageBar : Form
                 Rectangle cell = GetMetricBounds(index);
                 int cellWidth = cell.Width;
                 int x = cell.Left;
+                _alertLevels.TryGetValue(metric.Provider, out UsageAlertLevel level);
+                if (level != UsageAlertLevel.None)
+                {
+                    using SolidBrush warning = new SolidBrush(level == UsageAlertLevel.Critical ?
+                                                              Color.FromArgb(92, 36, 48) : Color.FromArgb(61, 32, 42));
+                    e.Graphics.FillRectangle(warning, cell.X, 1, cell.Width, Height - 2);
+                }
+
                 Color brand = metric.Provider == "Codex" ? Color.FromArgb(104, 223, 195) : Color.FromArgb(223, 170, 138);
                 if (metric.Provider == "Codex")
                 {
@@ -377,9 +409,11 @@ internal sealed class TopUsageBar : Form
                                                        center.Y + (float)Math.Sin(angle) * 5 * scale));
                     }
                 }
-                string text = (metric.Period.Length > 0 ? metric.Period + " " : "") + metric.Value;
+                string text = (level != UsageAlertLevel.None ? "! " : "") +
+                              (metric.Period.Length > 0 ? metric.Period + " " : "") + metric.Value;
                 DrawText(e.Graphics, text,
                          new Rectangle(x + (int)(19 * scale), 0, cellWidth - (int)(21 * scale), Height),
+                         level != UsageAlertLevel.None ? Color.FromArgb(255, 185, 193) :
                          metric.NeedsAttention == true ? Color.FromArgb(175, 187, 204) : ForeColor);
                 if (index > 0)
                 {

@@ -4,7 +4,8 @@ namespace UsageViewer.Services;
 
 internal sealed record PopupPreferences(bool ShowBoth = true, string ActiveProvider = "codex",
                                         bool ShowTopBar = true, bool AlwaysOnTop = true,
-                                        string? TopBarScreen = null, double TopBarPosition = 0.5);
+                                        string? TopBarScreen = null, double TopBarPosition = 0.5,
+                                        bool AlertSoundEnabled = true);
 
 internal sealed class PopupPreferencesStore
 {

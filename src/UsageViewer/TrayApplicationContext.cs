@@ -14,12 +14,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly CancellationTokenSource _shutdown = new CancellationTokenSource();
     private readonly UsagePopup _popup = new UsagePopup();
     private readonly TopUsageBar _topBar = new TopUsageBar();
+    private readonly UsageAlertMonitor _alerts = new UsageAlertMonitor();
+    private readonly UsageAlertSound _alertSound = new UsageAlertSound();
+    private readonly UsageAlertToast _alertToast = new UsageAlertToast();
     private readonly NotifyIcon _tray;
     private readonly ContextMenuStrip _menu = new ContextMenuStrip();
     private readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer { Interval = 5_000 };
     private readonly ToolStripItem _refreshMenuItem;
     private readonly ToolStripMenuItem _topBarMenuItem;
     private readonly ToolStripMenuItem _alwaysOnTopMenuItem;
+    private readonly ToolStripMenuItem _alertSoundMenuItem;
     private readonly RegisteredWaitHandle _showRegistration;
     private Icon _icon;
     private UsageSnapshot? _snapshot;
@@ -46,13 +50,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _popup.SetDetectedApps(_installed);
         _menu.Items.Add("사용량 보기", null, (_, _) => ShowPopup(_lastTrayAnchor ?? Cursor.Position));
         _refreshMenuItem = _menu.Items.Add("새로고침", null, async (_, _) => await RefreshAsync());
-        _menu.Items.Add("Codex 구독 연결", null, async (_, _) => await ConnectCodexAsync());
-        _menu.Items.Add("Claude 연결 / 계정 확인", null, async (_, _) => await GetClaudeConnection().ConnectAsync());
+        _menu.Items.Add("Codex 구독 연결 / 계정 확인", null, async (_, _) => await ConnectCodexAsync());
+        _menu.Items.Add("Claude 구독 연결 / 계정 확인", null, async (_, _) => await GetClaudeConnection().ConnectAsync());
         _menu.Items.Add(new ToolStripSeparator());
         _topBarMenuItem = new ToolStripMenuItem("모니터 상단에 표시") { CheckOnClick = true };
         _alwaysOnTopMenuItem = new ToolStripMenuItem("항상 가장 앞에 표시") { CheckOnClick = true };
         _menu.Items.Add(_topBarMenuItem);
         _menu.Items.Add(_alwaysOnTopMenuItem);
+        _alertSoundMenuItem = new ToolStripMenuItem("잔여량 경고음") { CheckOnClick = true };
+        _menu.Items.Add(_alertSoundMenuItem);
+        _alertSoundMenuItem.Click += (_, _) => _popup.SetAlertSoundEnabled(_alertSoundMenuItem.Checked);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("종료", null, async (_, _) => await ExitAsync());
         _topBarMenuItem.Click += (_, _) =>
@@ -235,6 +242,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
         PopupPreferences preferences = _popup.Preferences;
         _topBarMenuItem.Checked = preferences.ShowTopBar;
         _alwaysOnTopMenuItem.Checked = preferences.AlwaysOnTop;
+        _alertSoundMenuItem.Checked = preferences.AlertSoundEnabled;
+        if (preferences.AlertSoundEnabled == false)
+        {
+            _alertSound.Stop();
+        }
+
         _topBar.ApplyPreferences(preferences);
         if (preferences.ShowTopBar == false && _popup.IsDocked == true)
         {
@@ -318,6 +331,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         _popup.SetState(_snapshot, _refreshing, _error, _claudeSnapshot, _claudeError, _claudeStale);
         _topBar.SetUsage(_installed, _snapshot, _error, _claudeSnapshot, _claudeError, _claudeStale);
+        if (_exiting == false)
+        {
+            IReadOnlyList<UsageAlert> alerts = _alerts.Evaluate(_snapshot, _error, _claudeSnapshot, _claudeError,
+                                                               _claudeStale, DateTimeOffset.UtcNow, _topBar.IsFullScreen);
+            if (alerts.Count > 0)
+            {
+                _alertToast.ShowAlerts(alerts, _topBar.Location);
+                if (_popup.Preferences.AlertSoundEnabled == true &&
+                    alerts.Any(alert => alert.Level == UsageAlertLevel.Critical) == true)
+                {
+                    _alertSound.Play();
+                }
+            }
+        }
     }
 
     private ClaudeConnectionWindow GetClaudeConnection()
@@ -445,6 +472,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _shutdown.Cancel();
         _popup.Hide();
         _topBar.CloseForExit();
+        _alertSound.Stop();
+        _alertToast.Hide();
         if (_activeRefresh != null)
         {
             await _activeRefresh;
@@ -472,6 +501,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _icon.Dispose();
             _popup.Dispose();
             _topBar.Dispose();
+            _alertSound.Dispose();
+            _alertToast.Dispose();
             _claudeConnection?.Dispose();
             _codexConnection?.Dispose();
             _shutdown.Dispose();

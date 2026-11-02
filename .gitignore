@@ -23,3 +23,4 @@ credentials.json
 *.pfx
 id_rsa
 id_ed25519
+alerts.json

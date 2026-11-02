@@ -149,6 +149,19 @@ internal sealed class UsagePopup : Form
         UpdateDocument();
     }
 
+    public void SetAlertSoundEnabled(bool enabled)
+    {
+        bool changed = _preferences.AlertSoundEnabled != enabled;
+        _preferences = _preferences with { AlertSoundEnabled = enabled };
+        SavePreferences();
+        if (changed == true)
+        {
+            WindowPreferencesChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        UpdateDocument();
+    }
+
     public void CloseForExit()
     {
         _allowClose = true;
@@ -337,6 +350,8 @@ internal sealed class UsagePopup : Form
                             name,
                             shortName = name.Replace(" 한도", ""),
                             remaining = window.RemainingPercent,
+                            alert = UsageAlertPolicy.IsFresh(snapshot, state.Error, state.IsStale, DateTimeOffset.UtcNow) == true ?
+                                    UsageAlertPolicy.GetLevel(window, DateTimeOffset.UtcNow).ToString().ToLowerInvariant() : "none",
                             expired = UsageDisplayHelper.IsExpired(window),
                             resetText = UsageDisplayHelper.FormatReset(window)
                         });
