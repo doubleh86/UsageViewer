@@ -162,3 +162,8 @@ Claude의 상태 표시줄 설정이 수집 스크립트를 참조하므로 이 
 작업 지침과 C# 규약은 [AGENTS.md](AGENTS.md),
 구현 범위와 검증 결과는 [계획 문서](Docs/Plan/TrayApp.md)에 기록한다.
 공개 전 점검 범위와 라이선스·배포 주의 사항은 [공개 전 검토](Docs/PublicReleaseReview.md)에 기록한다.
+
+## 라이선스
+
+이 프로젝트는 [MIT License](LICENSE)를 따른다. Copyright (c) 2026 doubleh86.
+외부 구성 요소에는 해당 구성 요소의 라이선스가 적용되며, 배포 시 WebView2의 LICENSE·NOTICE를 함께 제공한다.

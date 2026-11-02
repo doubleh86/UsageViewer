@@ -23,9 +23,9 @@
 
 ## 공개 시 정리할 사항
 
-- 프로젝트 자체의 `LICENSE`가 없다. 재사용·수정·재배포를 허용할 오픈소스 프로젝트로 운영하려면
-  소유자가 라이선스를 선택해야 한다. 이번 검토에서 임의로 선택하거나 추가하지 않았다.
-  참고: [GitHub 라이선스 안내](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/licensing-a-repository).
+- 2026-11-02 사용자 요청으로 프로젝트에 [MIT License](../LICENSE)를 적용했다.
+  저작권 표기는 `Copyright (c) 2026 doubleh86`이며 빌드·배포 출력에 프로젝트 LICENSE를 포함한다.
+  WebView2 등 외부 구성 요소의 라이선스·고지 파일도 별도로 유지한다.
 - Claude 웹 사용량은 공개 API 계약이 아닌 페이지 응답에 의존한다. 서비스 변경에 따라 중단될 수 있다.
   공식 OpenAI·Anthropic 제품이나 공식 지원 연동으로 소개하지 않는다.
 - 배포에는 빌드한 패키지만 사용한다. `%LOCALAPPDATA%/UsageViewer`에는 로그인 세션과
