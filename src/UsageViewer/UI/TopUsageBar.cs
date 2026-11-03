@@ -22,6 +22,8 @@ internal sealed class TopUsageBar : Form
     private readonly List<TopBarMetric> _metrics = new List<TopBarMetric>();
     private readonly Dictionary<string, UsageAlertLevel> _alertLevels = new Dictionary<string, UsageAlertLevel>();
     private bool _enabled;
+    private bool _alwaysOnTop;
+    private IntPtr _lastTopMostForeground;
     private bool _detailsOpen;
     private bool _pressed;
     private bool _dragging;
@@ -62,6 +64,11 @@ internal sealed class TopUsageBar : Form
     public void ApplyPreferences(PopupPreferences preferences)
     {
         _enabled = preferences.ShowTopBar;
+        _alwaysOnTop = preferences.AlwaysOnTop;
+        if (_alwaysOnTop == false)
+        {
+            _lastTopMostForeground = IntPtr.Zero;
+        }
         if (TopMost != preferences.AlwaysOnTop)
         {
             TopMost = preferences.AlwaysOnTop;
@@ -266,6 +273,7 @@ internal sealed class TopUsageBar : Form
 
         if (visible == false)
         {
+            _lastTopMostForeground = IntPtr.Zero;
             return;
         }
 
@@ -275,6 +283,35 @@ internal sealed class TopUsageBar : Form
             LayoutDock();
         }
 
+        EnsureTopMost(GetForegroundWindow());
+    }
+
+    private void EnsureTopMost(IntPtr foreground)
+    {
+        if (_alwaysOnTop == false || _enabled == false || Visible == false || IsHandleCreated == false ||
+            _fullScreen == true || _detailsOpen == true || ContextMenuStrip?.Visible == true ||
+            foreground == IntPtr.Zero)
+        {
+            return;
+        }
+
+        GetWindowThreadProcessId(foreground, out uint processId);
+        if (processId == Environment.ProcessId)
+        {
+            return;
+        }
+
+        bool nativeTopMost = (GetWindowLongPtr(Handle, -20).ToInt64() & 0x00000008) != 0;
+        if (nativeTopMost == true && foreground == _lastTopMostForeground)
+        {
+            return;
+        }
+
+        const uint keepPlacementAndFocus = 0x0001 | 0x0002 | 0x0010 | 0x0200;
+        if (SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, keepPlacementAndFocus) == true)
+        {
+            _lastTopMostForeground = foreground;
+        }
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
@@ -533,11 +570,17 @@ internal sealed class TopUsageBar : Form
             return false;
         }
 
-        long style = GetWindowLongPtr(foreground, -16).ToInt64();
-        Rectangle screen = GetDockScreen().Bounds;
+        if (DwmGetWindowAttribute(foreground, 9, out NativeWindowRectangle frame,
+                                  Marshal.SizeOf<NativeWindowRectangle>()) == 0 &&
+            frame.Right > frame.Left && frame.Bottom > frame.Top)
+        {
+            rect = frame;
+        }
 
-        return (style & 0x00C00000) == 0 && rect.Left <= screen.Left && rect.Top <= screen.Top &&
-               rect.Right >= screen.Right && rect.Bottom >= screen.Bottom;
+        long style = GetWindowLongPtr(foreground, -16).ToInt64();
+
+        return TopBarWindowHelper.IsFullScreen(style, Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom),
+                                                GetDockScreen().Bounds);
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -579,6 +622,15 @@ internal sealed class TopUsageBar : Form
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
     private static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowPos(IntPtr window, IntPtr insertAfter, int x, int y, int width, int height,
+                                            uint flags);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out NativeWindowRectangle value,
+                                                    int size);
 }
 
 [StructLayout(LayoutKind.Sequential)]
