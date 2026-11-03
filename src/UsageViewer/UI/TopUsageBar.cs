@@ -107,7 +107,7 @@ internal sealed class TopUsageBar : Form
         UsagePacingAdvice advice = UsagePacingAdvisor.Evaluate(snapshot, error, stale, DateTimeOffset.UtcNow);
         _usageTips[id] = name + " · " + UsageDisplayHelper.GetPacingMessage(advice.Level) + "\n" +
                          UsageDisplayHelper.FormatLimitCoverage(snapshot) + "\n" +
-                         UsageDisplayHelper.FormatPacingDetails(advice) + "\n남은 시간에 균등 배분한 참고 안내";
+                         UsageDisplayHelper.FormatPacingDetails(advice) + "\n리셋 시간과 잔여량 기준";
     }
 
     private void UpdateUsageTip(Point point)
