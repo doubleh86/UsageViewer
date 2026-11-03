@@ -40,7 +40,7 @@ internal static class UsageDisplayHelper
         return level switch
         {
             UsagePacingLevel.Comfortable => "사용량을 더 써도 됩니다!",
-            UsagePacingLevel.Balanced => "여유를 두고 나눠 쓰세요",
+            UsagePacingLevel.Balanced => "리셋까지 사용 여유가 있어요",
             UsagePacingLevel.Caution => "리셋까지 조금 아껴 쓰세요",
             UsagePacingLevel.Low => "잔여량이 적어요 · 리셋까지 아껴 쓰세요",
             _ => "최신 한도·리셋 정보가 필요해요"
