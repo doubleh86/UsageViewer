@@ -335,31 +335,32 @@ internal sealed class UsagePopup : Form
             List<object> windows = new List<object>();
             if (snapshot != null)
             {
-                foreach (UsageBucket bucket in snapshot.Buckets)
+                foreach ((UsageBucket bucket, UsageWindow window) in snapshot.Buckets
+                    .SelectMany(bucket => new[] { bucket.Primary, bucket.Secondary }.OfType<UsageWindow>()
+                        .Select(window => (Bucket: bucket, Window: window)))
+                    .OrderBy(item => item.Window.DurationMinutes ?? int.MaxValue))
                 {
-                    foreach (UsageWindow window in new[] { bucket.Primary, bucket.Secondary }.OfType<UsageWindow>())
+                    string name = UsageDisplayHelper.FormatWindow(window.DurationMinutes, "사용 한도");
+                    if (snapshot.Buckets.Count > 1)
                     {
-                        string name = UsageDisplayHelper.FormatWindow(window.DurationMinutes, "사용 한도");
-                        if (snapshot.Buckets.Count > 1)
-                        {
-                            name = bucket.Name + " · " + name;
-                        }
-
-                        windows.Add(new
-                        {
-                            name,
-                            shortName = name.Replace(" 한도", ""),
-                            remaining = window.RemainingPercent,
-                            alert = UsageAlertPolicy.IsFresh(snapshot, state.Error, state.IsStale, DateTimeOffset.UtcNow) == true ?
-                                    UsageAlertPolicy.GetLevel(window, DateTimeOffset.UtcNow).ToString().ToLowerInvariant() : "none",
-                            expired = UsageDisplayHelper.IsExpired(window),
-                            resetText = UsageDisplayHelper.FormatReset(window)
-                        });
+                        name = bucket.Name + " · " + name;
                     }
+
+                    windows.Add(new
+                    {
+                        name,
+                        shortName = name.Replace(" 한도", ""),
+                        remaining = window.RemainingPercent,
+                        alert = UsageAlertPolicy.IsFresh(snapshot, state.Error, state.IsStale, DateTimeOffset.UtcNow) == true ?
+                                UsageAlertPolicy.GetLevel(window, DateTimeOffset.UtcNow).ToString().ToLowerInvariant() : "none",
+                        expired = UsageDisplayHelper.IsExpired(window),
+                        resetText = UsageDisplayHelper.FormatReset(window)
+                    });
                 }
             }
 
             CreditBalance? credits = snapshot?.Buckets.FirstOrDefault()?.Credits;
+            UsagePacingAdvice advice = UsagePacingAdvisor.Evaluate(snapshot, state.Error, state.IsStale, DateTimeOffset.UtcNow);
             string? balance = app.Id != "codex" || snapshot == null ? null :
                               credits?.Unlimited == true ? "무제한" :
                               credits?.Balance?.ToString("#,0.##", CultureInfo.InvariantCulture) ??
@@ -374,6 +375,13 @@ internal sealed class UsagePopup : Form
                        (state.Error == null ? "조회 중" : "연결 확인")) :
                        app.Id == "claude" ? (snapshot == null ? "연결 필요" : "마지막 수신") : "감지됨",
                 windows,
+                coverage = UsageDisplayHelper.FormatLimitCoverage(snapshot),
+                pacing = new
+                {
+                    level = advice.Level.ToString().ToLowerInvariant(),
+                    message = UsageDisplayHelper.GetPacingMessage(advice.Level),
+                    detail = UsageDisplayHelper.FormatPacingDetails(advice)
+                },
                 credits = balance,
                 error = app.UsageSupported == true ? state.Error : "감지됨 · 사용량 연동 미지원",
                 stale = app.UsageSupported == true && (state.IsStale == true || state.Error != null),

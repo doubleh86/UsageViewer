@@ -1,10 +1,68 @@
 using System.Globalization;
 using UsageViewer.Models;
+using UsageViewer.Services;
 
 namespace UsageViewer.UI;
 
 internal static class UsageDisplayHelper
 {
+    public static string FormatLimitCoverage(UsageSnapshot? snapshot)
+    {
+        if (snapshot == null)
+        {
+            return "한도 확인 대기";
+        }
+
+        List<UsageWindow> windows = snapshot.Buckets.SelectMany(bucket => new[] { bucket.Primary, bucket.Secondary })
+            .OfType<UsageWindow>().ToList();
+        if (windows.Count == 0)
+        {
+            return "한도 정보 미제공";
+        }
+
+        List<string> parts = windows.Where(window => window.DurationMinutes is > 0)
+            .Select(window => window.DurationMinutes!.Value).Distinct().Order()
+            .Select(minutes => FormatWindow(minutes, "사용 한도").Replace(" 한도", "")).ToList();
+        if (windows.Any(window => window.DurationMinutes is not > 0) == true)
+        {
+            parts.Add("구간 정보 미제공");
+        }
+        else if (windows.Any(window => window.DurationMinutes == 300) == false)
+        {
+            parts.Add("5시간 미제공");
+        }
+
+        return "수신 한도 · " + string.Join(" · ", parts);
+    }
+
+    public static string GetPacingMessage(UsagePacingLevel level)
+    {
+        return level switch
+        {
+            UsagePacingLevel.Comfortable => "사용량을 더 써도 됩니다!",
+            UsagePacingLevel.Balanced => "여유를 두고 나눠 쓰세요",
+            UsagePacingLevel.Caution => "리셋까지 조금 아껴 쓰세요",
+            UsagePacingLevel.Low => "잔여량이 적어요 · 리셋까지 아껴 쓰세요",
+            _ => "최신 한도·리셋 정보가 필요해요"
+        };
+    }
+
+    public static string FormatPacingDetails(UsagePacingAdvice advice)
+    {
+        if (advice.Window == null)
+        {
+            return "새로고침하거나 연결 상태를 확인해 주세요.";
+        }
+
+        string name = FormatWindow(advice.Window.DurationMinutes, "사용 한도");
+        if (string.IsNullOrEmpty(advice.BucketName) == false)
+        {
+            name = advice.BucketName + " · " + name;
+        }
+
+        return $"{name} {FormatPercent(advice.Window.RemainingPercent)} 남음\n{FormatReset(advice.Window)}";
+    }
+
     public static string FormatPercent(double percent)
     {
         return percent.ToString("0.#", CultureInfo.InvariantCulture) + "%";

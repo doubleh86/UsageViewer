@@ -7,7 +7,9 @@
 header,footer,.uv-line,.uv-brand,.uv-actions{display:flex;align-items:center;justify-content:space-between;gap:8px}header{padding-bottom:10px}.uv-actions{gap:2px;flex-shrink:0}.uv-provider{padding:12px 0;border-top:1px solid #303946}.uv-brand{justify-content:flex-start;margin-bottom:9px}.uv-brand>.uv-muted{margin-left:auto;font-size:11px}.uv-muted{color:#a8b5c6;font-weight:400}.uv-mark{width:17px;text-align:center;font-weight:600}.uv-codex{color:#73dec1}.uv-claude{color:#dfaa8b}.uv-small{font-size:11px}.uv-track{height:4px;background:#303946;margin:7px 0 6px;border-radius:2px;overflow:hidden}.uv-track>span{display:block;height:100%;background:#73dec1}.uv-cl-track>span{background:#dfaa8b}.uv-stale .uv-track>span{background:#7d8898}.uv-line{min-width:0}.uv-line>span{min-width:0}.uv-line>strong{flex-shrink:0}.uv-meta{flex-wrap:wrap;gap:2px 8px}.uv-meta .uv-extra{margin-left:auto}
 footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10px;flex-wrap:wrap;gap:6px}.uv-view-toggle{display:flex;align-items:center;gap:6px;font-size:11px;color:#a8b5c6;cursor:pointer}.uv-view-toggle input{margin:0;width:12px;height:12px;accent-color:#73dec1;cursor:pointer}.uv-controls{display:flex;align-items:center;justify-content:space-between;gap:8px;padding-top:9px}.uv-detected{font-size:11px;color:#a8b5c6}.uv-tabs{display:flex;gap:4px;flex-wrap:wrap;min-width:0}.uv-tabs button{padding:3px 6px}.uv-tabs button[aria-pressed=true]{color:#edf2f8;background:#2d3744;font-weight:600}.uv-tab-panel{padding:8px 0 12px}.uv-main-value{font-size:24px;letter-spacing:-.6px}.uv-main-value small{font-size:11px;letter-spacing:0;font-weight:400;color:#a8b5c6}.uv-credit{margin-top:15px;font-size:12px}.uv-empty{font-size:12px;color:#a8b5c6;padding:2px 0;overflow-wrap:anywhere}.uv-connect{color:#73dec1;padding:0;min-height:24px;text-decoration:underline}.uv-warning{color:#efc77f;font-size:11px;margin-top:6px}.uv-tab-panel .uv-warning{margin-bottom:6px}.uv-details{margin-top:12px}.uv-subtle{opacity:.75}.uv-unsupported{padding:8px 0}.uv-unsupported .uv-brand{margin:0}.uv-unsupported .uv-small{padding:4px 0 0 25px}#app{width:100%}
 .uv-window.uv-docked{border-top:0;border-radius:0 0 12px 12px;padding-top:12px}
+.uv-limits{font-size:10px;color:#a8b5c6;margin:0 0 7px;overflow-wrap:anywhere}
 .uv-track.uv-low>span{background:#f88b98}.uv-track.uv-critical>span{background:#ff697e}.uv-alert-note{margin:7px 0;padding:6px 8px;border-radius:5px;background:#3d202a;color:#ffbdc5;font-size:11px;overflow-wrap:anywhere}.uv-alert-note.uv-critical{background:#5c2430;color:#ffd8dd}
+.uv-pacing{margin-top:10px;padding:8px 9px;border-left:2px solid #697b91;border-radius:4px;background:#202833;overflow-wrap:anywhere}.uv-pacing strong{display:block;font-size:12px;font-weight:600}.uv-pacing p{margin:3px 0 0;font-size:11px;color:#b6c3d2;white-space:pre-line}.uv-pacing small{display:block;margin-top:4px;color:#91a1b5;font-size:10px}.uv-pacing.uv-comfortable{border-color:#73dec1;background:#1c302d}.uv-comfortable strong{color:#91ead3}.uv-pacing.uv-caution{border-color:#efc77f}.uv-caution strong{color:#efc77f}.uv-pacing.uv-low{border-color:#f88b98}.uv-low strong{color:#ffbdc5}.uv-unavailable strong{color:#a8b5c6}
 </style></head>
 <body><main id="app" class="uv-window" aria-label="AI 사용량"><header><strong>Usage</strong></header><div class="uv-empty">설치된 AI 확인 중…</div></main>
 <script>
@@ -25,6 +27,8 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
  function brand(p){return '<div class="uv-brand"><span class="uv-mark uv-'+esc(p.id)+'">'+(p.id==='codex'?'C':p.id==='claude'?'✳':'·')+'</span><strong>'+esc(p.name)+'</strong><span class="uv-muted">'+esc(p.plan||'감지됨')+'</span></div>'}
  function meter(p,w){return '<div class="uv-track '+(p.id==='claude'?'uv-cl-track ':'')+(w.alert==='critical'?'uv-critical':w.alert==='warning'?'uv-low':'')+'"><span style="width:'+(w.expired?0:Math.max(0,Math.min(100,w.remaining)))+'%"></span></div>'}
  function alertNotice(p){const low=p.windows.filter(w=>w.alert==='critical'||w.alert==='warning').sort((a,b)=>a.remaining-b.remaining);if(!low.length)return '';const w=low[0],critical=w.alert==='critical';return '<div class="uv-alert-note '+(critical?'uv-critical':'')+'">! '+(critical?'레드 얼럿':'사용량 주의')+' · '+esc(w.shortName)+' '+percent(w.remaining)+' 남음</div>'}
+ function pacing(p){if(!p.pacing)return '';const a=p.pacing;return '<aside class="uv-pacing uv-'+esc(a.level)+'" aria-label="사용 여유 안내"><strong>'+esc(a.message)+'</strong><p>'+esc(a.detail)+'</p>'+(a.level==='unavailable'?'':'<small>남은 시간에 균등 배분한 참고 안내</small>')+'</aside>'}
+ function coverage(p){return p.coverage?'<div class="uv-limits">'+esc(p.coverage)+'</div>':''}
  function empty(p){return '<div class="uv-empty">'+esc(p.error||'사용량 확인 중…')+'</div>'+(p.canConnect?'<button type="button" class="uv-connect" data-action="connect" data-id="'+esc(p.id)+'">'+(p.id==='codex'?'ChatGPT 연결하기':'연결하기')+'</button>':'')}
  function combined(p){
   if(!p.supported)return '<section class="uv-provider uv-unsupported">'+brand(p)+'<div class="uv-muted uv-small">감지됨 · 사용량 연동 미지원</div></section>';
@@ -36,16 +40,16 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
    if(p.error)content+='<div class="uv-warning">'+esc(p.error)+'</div>'+(p.canConnect?'<button type="button" class="uv-connect" data-action="connect" data-id="'+esc(p.id)+'">다시 연결</button>':'');
    if(p.stale)content+='<div class="uv-warning">이전 수신 값 · '+esc(p.updated)+'</div>';
   }
-  return '<section class="uv-provider '+(p.stale?'uv-stale':'')+'">'+brand(p)+alertNotice(p)+content+'</section>';
+  return '<section class="uv-provider '+(p.stale?'uv-stale':'')+'">'+brand(p)+coverage(p)+alertNotice(p)+content+pacing(p)+'</section>';
  }
  function tabbed(p){
   if(!p.supported)return '<section class="uv-tab-panel">'+empty(p)+'</section>';
-  const w=p.windows[0];if(!w)return '<section class="uv-tab-panel">'+empty(p)+'</section>';
-  let html='<section class="uv-tab-panel '+(p.stale?'uv-stale':'')+'"><div class="uv-line"><span class="uv-muted">'+esc(w.name)+'</span><strong class="uv-main-value">'+(w.expired?'—':percent(w.remaining))+' <small>'+(w.expired?'갱신 필요':'남음')+'</small></strong></div>'+meter(p,w)+'<div class="uv-small uv-muted">'+esc(w.resetText)+'</div>';
+  const w=p.windows[0];if(!w)return '<section class="uv-tab-panel">'+coverage(p)+empty(p)+pacing(p)+'</section>';
+  let html='<section class="uv-tab-panel '+(p.stale?'uv-stale':'')+'">'+coverage(p)+'<div class="uv-line"><span class="uv-muted">'+esc(w.name)+'</span><strong class="uv-main-value">'+(w.expired?'—':percent(w.remaining))+' <small>'+(w.expired?'갱신 필요':'남음')+'</small></strong></div>'+meter(p,w)+'<div class="uv-small uv-muted">'+esc(w.resetText)+'</div>';
   if(p.credits!=null)html+='<div class="uv-line uv-credit"><span class="uv-muted">크레딧</span><strong>'+esc(p.credits)+'</strong></div>';
-  for(const next of p.windows.slice(1))html+='<div class="uv-line uv-credit" title="'+esc(next.resetText)+'"><span class="uv-muted">'+esc(next.name)+'</span><strong>'+(next.expired?'갱신 필요':percent(next.remaining)+' 남음')+'</strong></div>';
+  for(const next of p.windows.slice(1))html+='<div class="uv-line uv-credit"><span class="uv-muted">'+esc(next.name)+'</span><strong>'+(next.expired?'갱신 필요':percent(next.remaining)+' 남음')+'</strong></div><div class="uv-small uv-muted">'+esc(next.resetText)+'</div>';
   if(p.error||p.stale)html+='<div class="uv-warning">'+esc(p.error||'이전 수신 값')+'</div>'+(p.canConnect?'<button type="button" class="uv-connect" data-action="connect" data-id="'+esc(p.id)+'">다시 연결</button>':'');
-  return html+alertNotice(p)+'</section>';
+  return html+alertNotice(p)+pacing(p)+'</section>';
  }
  function render(){
   app.classList.toggle('uv-docked',state.docked===true);
