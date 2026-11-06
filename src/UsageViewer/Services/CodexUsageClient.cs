@@ -33,24 +33,58 @@ internal sealed class CodexUsageClient
         using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(openAuthorization == null ? TimeSpan.FromSeconds(30) : TimeSpan.FromMinutes(5));
         CancellationToken queryToken = timeout.Token;
+        queryToken.ThrowIfCancellationRequested();
         if (openAuthorization != null)
         {
             Directory.CreateDirectory(_profilePath);
         }
 
-        ProcessStartInfo startInfo = CreateStartInfo(openAuthorization != null || Directory.Exists(_profilePath) == true);
+        bool isolated = openAuthorization != null || Directory.Exists(_profilePath) == true;
+        try
+        {
+            UsageSnapshot snapshot;
+            try
+            {
+                snapshot = await RunProcessAsync(isolated, openAuthorization, queryToken);
+            }
+            catch (UsageQueryException) when (openAuthorization == null && isolated == true &&
+                                              queryToken.IsCancellationRequested == false)
+            {
+                // Retry once after the dedicated process is fully stopped, within the original deadline.
+                snapshot = await RunProcessAsync(false, null, queryToken);
+            }
+
+            queryToken.ThrowIfCancellationRequested();
+
+            return snapshot;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested == false)
+        {
+            throw new UsageQueryException(openAuthorization == null ?
+                                          "사용량 조회 시간이 초과되었습니다. 네트워크 연결을 확인해 주세요." :
+                                          "ChatGPT 연결 대기 시간이 지났습니다. 연결하기를 다시 눌러 주세요.");
+        }
+    }
+
+    private async Task<UsageSnapshot> RunProcessAsync(bool isolated, Action<Uri>? openAuthorization,
+                                                     CancellationToken queryToken)
+    {
+        queryToken.ThrowIfCancellationRequested();
+        ProcessStartInfo startInfo = CreateStartInfo(isolated);
+        using CancellationTokenSource stderrCancellation = CancellationTokenSource.CreateLinkedTokenSource(queryToken);
 
         using Process process = new Process { StartInfo = startInfo };
         Task? stderrDrain = null;
         try
         {
+            queryToken.ThrowIfCancellationRequested();
             if (process.Start() == false)
             {
                 throw new UsageQueryException("Codex 조회 프로세스를 시작하지 못했습니다.");
             }
 
             // Drain without recording raw stderr: it can contain paths or account information.
-            stderrDrain = DrainErrorsAsync(process.StandardError, queryToken);
+            stderrDrain = DrainErrorsAsync(process.StandardError, stderrCancellation.Token);
             await SendAsync(process, new
             {
                 id = 1,
@@ -87,12 +121,6 @@ internal sealed class CodexUsageClient
 
             return _parser.Parse(planName, limits);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested == false)
-        {
-            throw new UsageQueryException(openAuthorization == null ?
-                                          "사용량 조회 시간이 초과되었습니다. 네트워크 연결을 확인해 주세요." :
-                                          "ChatGPT 연결 대기 시간이 지났습니다. 연결하기를 다시 눌러 주세요.");
-        }
         catch (Win32Exception)
         {
             throw new UsageQueryException("Codex 실행 파일에 접근하지 못했습니다. 설치 경로와 실행 권한을 확인해 주세요.");
@@ -105,22 +133,34 @@ internal sealed class CodexUsageClient
         {
             throw new UsageQueryException("Codex 응답을 읽지 못했습니다. Codex CLI 업데이트가 필요할 수 있습니다.");
         }
+        catch (InvalidOperationException)
+        {
+            throw new UsageQueryException("Codex 응답 형식이 올바르지 않습니다. Codex CLI 업데이트 후 다시 확인해 주세요.");
+        }
         finally
         {
-            timeout.Cancel();
-            await StopProcessAsync(process);
-            if (stderrDrain != null)
+            try
             {
-                try
+                stderrCancellation.Cancel();
+                await StopProcessAsync(process);
+                if (stderrDrain != null)
                 {
-                    await stderrDrain;
+                    try
+                    {
+                        await stderrDrain;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                    }
+                    catch (IOException)
+                    {
+                    }
                 }
-                catch (OperationCanceledException)
-                {
-                }
-                catch (IOException)
-                {
-                }
+            }
+            finally
+            {
+                // Cancellation takes precedence even if it arrives while an error is being cleaned up.
+                queryToken.ThrowIfCancellationRequested();
             }
         }
     }

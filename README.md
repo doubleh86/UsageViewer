@@ -51,10 +51,16 @@ CLI가 API 키로 연결되어 있거나 다른 앱과 인증이 섞이면 팝�
 트레이의 **Codex 구독 연결 / 계정 확인**을 누른다. 브라우저에서 Codex 앱과 같은 구독 계정으로 직접 로그인한다.
 전용 연결 후에는 표시기 프로필의 로그인을 우선 사용한다. 다른 앱을 위해 전역 `codex login`을 바꿀 필요가 없다.
 
+일반 새로고침과 `--diagnose`는 전용 프로필이 있으면 먼저 조회한다. 정상 전용 조회는 기본 CLI를 추가 호출하지 않는다.
+전용 조회가 인증 갱신·401·연결/응답 오류 등으로 실패하면 그 프로세스를 종료한 뒤 기본 CLI로 한 번만 재조회한다.
+전용 프로필이 없으면 처음부터 기본 CLI만 사용한다. 기본 CLI도 실패하거나 미로그인·API 키·잘못된 응답이면
+오류를 표시하며 성공이나 0%로 처리하지 않는다. **ChatGPT 연결하기**의 명시적 로그인 실패·사용자 취소에는 재시도하지 않는다.
+
 전용 연결은 `%LOCALAPPDATA%/UsageViewer/CodexProfile`에서 Codex 자체가 관리하며 인증 파일을 직접 읽거나 복사하지 않는다.
 이 자식 프로세스만 전용 `CODEX_HOME`과 파일 자격 증명 저장소를 사용하고 API 키·워크로드 인증 환경 변수를 제외한다.
 다른 프로세스의 환경, 기존 Codex 홈·계정·대화·설정은 변경하지 않는다.
-전용 연결 전의 기존 CLI 조회는 사용자 지정 `CODEX_HOME`을 그대로 따른다.
+기본 CLI 조회는 전용 연결 전과 fallback 모두 사용자 지정 `CODEX_HOME`과 상속받은 인증 환경을 그대로 따른다.
+`USAGEVIEWER_CODEX_PATH`로 지정한 실행 파일도 두 시도에서 유지한다.
 
 ## 조회 방식과 범위
 
@@ -62,7 +68,8 @@ CLI가 API 키로 연결되어 있거나 다른 앱과 인증이 섞이면 팝�
 `codex app-server --listen stdio://`를 실행하고 `initialize` / `initialized` 이후
 평소에는 `account/read`, `account/rateLimits/read`만 호출한다.
 사용자가 표시기 전용 연결을 선택한 경우에만 전용 프로필에서 `account/login/start`를 추가로 호출한다.
-조회마다 자식 프로세스를 시작하고 결과를 받거나 30초 제한에 도달하면 정리한다.
+일반 조회 전체는 재시도를 포함해 30초 제한을 공유하며, 취소·제한시간 경과 후에는 재시도하지 않는다.
+명시적 연결의 제한시간은 5분이다. 각 자식 프로세스는 정리 시 최대 1초의 정상 종료 대기 후 프로세스 트리와 함께 종료한다.
 
 앱은 인증 파일·토큰을 직접 읽거나 저장하지 않는다. 전용 연결의 저장과 인증 갱신 등 내부 처리는 Codex CLI가 담당한다.
 대화 생성, 모델 실행, 초기화 크레딧 사용, 계정 설정 변경은 하지 않는다.
@@ -82,6 +89,21 @@ Start-Process .\src\UsageViewer\bin\Release\net10.0-windows\UsageViewer.exe `
     -ArgumentList '--diagnose', '.artifacts\diagnostics.json' -Wait -WindowStyle Hidden
 Get-Content .artifacts\diagnostics.json
 ```
+
+전용 프로필 fallback의 재실행 가능한 회귀 검증은 Release 빌드 후 실행한다.
+도구는 .NET 10 SDK(기본 `$env:USERPROFILE\.dotnet\dotnet.exe`, 필요하면 `-DotNetPath` 지정)와 PowerShell 7을 사용한다.
+
+```powershell
+pwsh -NoProfile -File .\Tools\Test-CodexProfileFallback.ps1
+```
+
+실제 Release DLL의 클라이언트를 별도 임시 프로필·가짜 네이티브 CLI로 호출하며 실제 로그인은 사용하지 않는다.
+테스트 프로젝트·외부 패키지 없이 SDK 컴파일러로 프로토콜 fixture만 생성하고, Git 제외 `.artifacts`의 임시 파일은 종료 시 제거한다.
+선택 순서·최대 1회 재시도·오류·명시적 연결·취소·전체 제한시간·자식 프로세스 종료·환경 격리를 확인한다.
+구현 범위와 실행 결과, 실계정/화면 확인 여부는 [전용 프로필 fallback 계획](Docs/Plan/CodexProfileFallback.md)에 기록한다.
+2026-11-07 검증: Release 빌드(경고·오류 0개), 실제 클라이언트 격리 회귀 37개, `git diff --check` 통과.
+실계정 `--diagnose`는 현재 환경에서 API 키 연결 오류로 종료하여 ChatGPT 로그인 재사용 성공은 미확인이다.
+실제 화면은 사용자 확인 대상이며 실행 중인 앱은 교체하지 않았다.
 
 ## Claude 앱 사용량 연결
 
