@@ -35,11 +35,29 @@ internal static class UsageDisplayHelper
         return "수신 한도 · " + string.Join(" · ", parts);
     }
 
-    public static string GetPacingMessage(UsagePacingLevel level)
+    public static string GetPacingMessage(UsagePacingAdvice advice)
     {
-        return level switch
+        if (advice.Level == UsagePacingLevel.Low)
         {
-            UsagePacingLevel.Comfortable => "사용량을 더 써도 됩니다!",
+            return "잔여량이 적어요 · 리셋까지 아껴 쓰세요";
+        }
+        if (advice.DailyBudget?.Status == UsageDailyBudgetStatus.Unavailable)
+        {
+            return "오늘 권장 예산 계산 보류";
+        }
+        if (advice.DailyBudget?.Limiting is UsageDailyBudgetItem daily)
+        {
+            if (daily.AdditionalPercentPoints == 0)
+            {
+                return "오늘 추가 권장량 없음 · 목표 도달";
+            }
+            string end = daily.EndsAtReset == true ? "초기화 전까지" : "오늘 자정까지";
+            return $"{end} 추가 약 {daily.AdditionalPercentPoints.ToString("0.00", CultureInfo.InvariantCulture)}%p 사용 권장";
+        }
+
+        return advice.Level switch
+        {
+            UsagePacingLevel.Comfortable => "리셋까지 사용 여유가 있어요",
             UsagePacingLevel.Balanced => "리셋까지 사용 여유가 있어요",
             UsagePacingLevel.Caution => "리셋까지 조금 아껴 쓰세요",
             UsagePacingLevel.Low => "잔여량이 적어요 · 리셋까지 아껴 쓰세요",
@@ -49,9 +67,33 @@ internal static class UsageDisplayHelper
 
     public static string FormatPacingDetails(UsagePacingAdvice advice)
     {
+        UsageDailyBudget? daily = advice.DailyBudget;
+        if (daily?.Status == UsageDailyBudgetStatus.Unavailable)
+        {
+            return "계산 보류 · " + daily.Reason + "\n새로고침하거나 일일 기준 상태를 확인해 주세요.";
+        }
+        if (daily?.Limiting is UsageDailyBudgetItem limiting)
+        {
+            string details = string.Join("\n", daily.Items!.OrderBy(item => item.AdditionalPercentPoints).Select(item =>
+                $"{item.LimitName} · 추가 {item.AdditionalPercentPoints.ToString("0.00", CultureInfo.InvariantCulture)}%p" +
+                $" · 주간 잔여 {item.TargetRemainingPercent.ToString("0.00", CultureInfo.InvariantCulture)}% 이상 유지" +
+                $"\n기준 종료 {item.EndsAt.ToLocalTime():MM/dd HH:mm} · 초기화 {item.ResetsAt.ToLocalTime():MM/dd HH:mm}"));
+            details += "\n요약 기준: " + limiting.LimitName;
+            if (daily.Items!.Count > 1)
+            {
+                details += " · 각 모델은 자기 주간 한도 기준";
+            }
+            if (advice.ShortTermWindow != null)
+            {
+                details += "\n5시간 한도가 더 빠듯해요 · " +
+                           FormatPercent(advice.ShortTermWindow.RemainingPercent) + " 남음 · 단기 사용을 아껴 쓰세요";
+            }
+            return details;
+        }
         if (advice.Window == null)
         {
-            return "새로고침하거나 연결 상태를 확인해 주세요.";
+            return (daily?.Reason != null ? daily.Reason + " · 일일 예산 계산 불가\n" : "") +
+                   "새로고침하거나 연결 상태를 확인해 주세요.";
         }
 
         string name = FormatWindow(advice.Window.DurationMinutes, "사용 한도");
@@ -60,7 +102,15 @@ internal static class UsageDisplayHelper
             name = advice.BucketName + " · " + name;
         }
 
-        return $"{name} {FormatPercent(advice.Window.RemainingPercent)} 남음\n{FormatReset(advice.Window)}";
+        return (daily?.Status == UsageDailyBudgetStatus.NotProvided ? "주간 한도 미제공 · 일일 예산 계산 불가\n" : "") +
+               $"{name} {FormatPercent(advice.Window.RemainingPercent)} 남음\n{FormatReset(advice.Window)}";
+    }
+
+    public static string FormatPacingBasis(UsagePacingAdvice advice)
+    {
+        return advice.DailyBudget?.Limiting != null ?
+               "리셋 때 10%를 남기는 참고 예산 · %p는 해당 주간 전체 한도 기준 · 실제 사용 보장 아님" :
+               "리셋 시간과 잔여량 기준";
     }
 
     public static string FormatPercent(double percent)

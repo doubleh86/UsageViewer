@@ -8,7 +8,8 @@ using UsageViewer.Services;
 
 namespace UsageViewer.UI;
 
-internal sealed record ProviderUsageState(string Name, UsageSnapshot? Snapshot, string? Error, bool IsStale = false);
+internal sealed record ProviderUsageState(string Name, UsageSnapshot? Snapshot, string? Error, bool IsStale = false,
+                                          UsagePacingAdvice? Advice = null);
 
 internal sealed class UsagePopup : Form
 {
@@ -68,10 +69,11 @@ internal sealed class UsagePopup : Form
     }
 
     public void SetState(UsageSnapshot? snapshot, bool refreshing, string? error, UsageSnapshot? claude = null,
-                         string? claudeError = null, bool claudeStale = false)
+                         string? claudeError = null, bool claudeStale = false,
+                         UsagePacingAdvice? codexAdvice = null, UsagePacingAdvice? claudeAdvice = null)
     {
-        _codex = new ProviderUsageState("Codex", snapshot, error);
-        _claude = new ProviderUsageState("Claude", claude, claudeError, claudeStale);
+        _codex = new ProviderUsageState("Codex", snapshot, error, Advice: codexAdvice);
+        _claude = new ProviderUsageState("Claude", claude, claudeError, claudeStale, claudeAdvice);
         _refreshing = refreshing;
         UpdateDocument();
     }
@@ -346,11 +348,14 @@ internal sealed class UsagePopup : Form
                         name = bucket.Name + " · " + name;
                     }
 
+                    bool valid = double.IsFinite(window.UsedPercent) == true &&
+                                 window.UsedPercent >= 0 && window.UsedPercent <= 100;
                     windows.Add(new
                     {
                         name,
                         shortName = name.Replace(" 한도", ""),
-                        remaining = window.RemainingPercent,
+                        remaining = valid == true ? (double?)window.RemainingPercent : null,
+                        invalid = valid == false,
                         alert = UsageAlertPolicy.IsFresh(snapshot, state.Error, state.IsStale, DateTimeOffset.UtcNow) == true ?
                                 UsageAlertPolicy.GetLevel(window, DateTimeOffset.UtcNow).ToString().ToLowerInvariant() : "none",
                         expired = UsageDisplayHelper.IsExpired(window),
@@ -360,7 +365,7 @@ internal sealed class UsagePopup : Form
             }
 
             CreditBalance? credits = snapshot?.Buckets.FirstOrDefault()?.Credits;
-            UsagePacingAdvice advice = UsagePacingAdvisor.Evaluate(snapshot, state.Error, state.IsStale, DateTimeOffset.UtcNow);
+            UsagePacingAdvice advice = state.Advice ?? new UsagePacingAdvice(UsagePacingLevel.Unavailable);
             string? balance = app.Id != "codex" || snapshot == null ? null :
                               credits?.Unlimited == true ? "무제한" :
                               credits?.Balance?.ToString("#,0.##", CultureInfo.InvariantCulture) ??
@@ -379,8 +384,9 @@ internal sealed class UsagePopup : Form
                 pacing = new
                 {
                     level = advice.Level.ToString().ToLowerInvariant(),
-                    message = UsageDisplayHelper.GetPacingMessage(advice.Level),
-                    detail = UsageDisplayHelper.FormatPacingDetails(advice)
+                    message = UsageDisplayHelper.GetPacingMessage(advice),
+                    detail = UsageDisplayHelper.FormatPacingDetails(advice),
+                    basis = UsageDisplayHelper.FormatPacingBasis(advice)
                 },
                 credits = balance,
                 error = app.UsageSupported == true ? state.Error : "감지됨 · 사용량 연동 미지원",

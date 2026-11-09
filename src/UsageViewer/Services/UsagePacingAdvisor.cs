@@ -11,11 +11,38 @@ internal enum UsagePacingLevel
     Low
 }
 
-internal sealed record UsagePacingAdvice(UsagePacingLevel Level, UsageWindow? Window = null, string? BucketName = null);
+internal sealed record UsagePacingAdvice(UsagePacingLevel Level, UsageWindow? Window = null, string? BucketName = null,
+                                          UsageDailyBudget? DailyBudget = null, UsageWindow? ShortTermWindow = null);
 
 internal static class UsagePacingAdvisor
 {
-    public static UsagePacingAdvice Evaluate(UsageSnapshot? snapshot, string? error, bool stale, DateTimeOffset now)
+    public static UsagePacingAdvice Evaluate(UsageSnapshot? snapshot, string? error, bool stale, DateTimeOffset now,
+                                             UsageDailyBudget dailyBudget)
+    {
+        UsagePacingAdvice advice = EvaluateLimits(snapshot, error, stale, now);
+        UsageWindow? shortTerm = snapshot?.Buckets.SelectMany(bucket => new[] { bucket.Primary, bucket.Secondary })
+            .OfType<UsageWindow>().Where(window => window.DurationMinutes == 300 && window.ResetsAt > now &&
+                                                  double.IsFinite(window.UsedPercent) == true &&
+                                                  window.UsedPercent >= 0 && window.UsedPercent <= 100)
+            .Where(window => window.RemainingPercent <= 10 ||
+                             window.RemainingPercent < Math.Max(10, (window.ResetsAt!.Value - now).TotalMinutes / 3) ||
+                             (decimal)window.RemainingPercent < (dailyBudget.Limiting?.AdditionalPercentPoints ?? 0))
+            .MinBy(window => window.RemainingPercent);
+        UsagePacingLevel level = advice.Level;
+        if (dailyBudget.Status == UsageDailyBudgetStatus.Unavailable && level != UsagePacingLevel.Low)
+        {
+            level = UsagePacingLevel.Unavailable;
+        }
+        else if (dailyBudget.Limiting != null && level != UsagePacingLevel.Low)
+        {
+            level = shortTerm != null || dailyBudget.Status == UsageDailyBudgetStatus.Exhausted ?
+                    UsagePacingLevel.Caution : UsagePacingLevel.Balanced;
+        }
+
+        return advice with { Level = level, DailyBudget = dailyBudget, ShortTermWindow = shortTerm };
+    }
+
+    private static UsagePacingAdvice EvaluateLimits(UsageSnapshot? snapshot, string? error, bool stale, DateTimeOffset now)
     {
         if (UsageAlertPolicy.IsFresh(snapshot, error, stale, now) == false)
         {

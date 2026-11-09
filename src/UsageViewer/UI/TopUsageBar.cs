@@ -80,13 +80,14 @@ internal sealed class TopUsageBar : Form
     }
 
     public void SetUsage(IReadOnlyList<DetectedAiApp> installed, UsageSnapshot? codex, string? codexError,
-                         UsageSnapshot? claude, string? claudeError, bool claudeStale)
+                         UsageSnapshot? claude, string? claudeError, bool claudeStale,
+                         UsagePacingAdvice codexAdvice, UsagePacingAdvice claudeAdvice)
     {
         _metrics.Clear();
         _alertLevels.Clear();
         _usageTips.Clear();
-        SetUsageTip("codex", "Codex", codex, codexError, false);
-        SetUsageTip("claude", "Claude", claude, claudeError, claudeStale);
+        SetUsageTip("codex", "Codex", codex, codexAdvice);
+        SetUsageTip("claude", "Claude", claude, claudeAdvice);
         SetAlertLevel("Codex", codex, codexError, false);
         SetAlertLevel("Claude", claude, claudeError, claudeStale);
         if (codex != null || installed.Any(app => app.Id == "codex") == true)
@@ -109,12 +110,12 @@ internal sealed class TopUsageBar : Form
         Invalidate();
     }
 
-    private void SetUsageTip(string id, string name, UsageSnapshot? snapshot, string? error, bool stale)
+    private void SetUsageTip(string id, string name, UsageSnapshot? snapshot, UsagePacingAdvice advice)
     {
-        UsagePacingAdvice advice = UsagePacingAdvisor.Evaluate(snapshot, error, stale, DateTimeOffset.UtcNow);
-        _usageTips[id] = name + " · " + UsageDisplayHelper.GetPacingMessage(advice.Level) + "\n" +
+        _usageTips[id] = name + " · " + UsageDisplayHelper.GetPacingMessage(advice) + "\n" +
                          UsageDisplayHelper.FormatLimitCoverage(snapshot) + "\n" +
-                         UsageDisplayHelper.FormatPacingDetails(advice) + "\n리셋 시간과 잔여량 기준";
+                         UsageDisplayHelper.FormatPacingDetails(advice) + "\n" +
+                         UsageDisplayHelper.FormatPacingBasis(advice);
     }
 
     private void UpdateUsageTip(Point point)
@@ -171,6 +172,11 @@ internal sealed class TopUsageBar : Form
 
         List<UsageWindow> windows = snapshot.Buckets.SelectMany(bucket => new[] { bucket.Primary, bucket.Secondary })
             .OfType<UsageWindow>().OrderBy(window => window.DurationMinutes ?? int.MaxValue).ToList();
+        if (windows.Any(item => double.IsFinite(item.UsedPercent) == false ||
+                                item.UsedPercent < 0 || item.UsedPercent > 100) == true)
+        {
+            return new TopBarMetric(provider, "", "확인 필요", true);
+        }
         UsageWindow? window = windows.FirstOrDefault(item => UsageDisplayHelper.IsExpired(item) == false);
         if (_alertLevels.TryGetValue(provider, out UsageAlertLevel level) == true && level != UsageAlertLevel.None)
         {
