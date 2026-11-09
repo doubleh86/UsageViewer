@@ -4,17 +4,18 @@
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{margin:0;background:transparent}body{font:13px/1.5 'Segoe UI','Malgun Gothic',sans-serif;color:#edf2f8;font-variant-numeric:tabular-nums}
 .uv-window{padding:16px;background:#171d25;border:1px solid #303946;border-radius:12px;overflow:hidden}strong{font-weight:600}button,input{font:inherit}button{color:#a8b5c6;background:transparent;border:0;border-radius:5px;min-width:26px;min-height:26px;display:inline-flex;align-items:center;justify-content:center;padding:4px;cursor:pointer}button:hover{background:#2b3441}button:focus-visible,input:focus-visible{outline:2px solid #73dec1;outline-offset:1px}button:disabled{opacity:.5;cursor:default}button svg{width:14px;height:14px}
-header,footer,.uv-line,.uv-brand,.uv-actions{display:flex;align-items:center;justify-content:space-between;gap:8px}header{padding-bottom:10px}.uv-actions{gap:2px;flex-shrink:0}.uv-provider{padding:12px 0;border-top:1px solid #303946}.uv-brand{justify-content:flex-start;margin-bottom:9px}.uv-brand>.uv-muted{margin-left:auto;font-size:11px}.uv-muted{color:#a8b5c6;font-weight:400}.uv-mark{width:17px;text-align:center;font-weight:600}.uv-codex{color:#73dec1}.uv-claude{color:#dfaa8b}.uv-small{font-size:11px}.uv-track{height:4px;background:#303946;margin:7px 0 6px;border-radius:2px;overflow:hidden}.uv-track>span{display:block;height:100%;background:#73dec1}.uv-cl-track>span{background:#dfaa8b}.uv-stale .uv-track>span{background:#7d8898}.uv-line{min-width:0}.uv-line>span{min-width:0}.uv-line>strong{flex-shrink:0}.uv-meta{flex-wrap:wrap;gap:2px 8px}.uv-meta .uv-extra{margin-left:auto}
-footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10px;flex-wrap:wrap;gap:6px}.uv-view-toggle{display:flex;align-items:center;gap:6px;font-size:11px;color:#a8b5c6;cursor:pointer}.uv-view-toggle input{margin:0;width:12px;height:12px;accent-color:#73dec1;cursor:pointer}.uv-controls{display:flex;align-items:center;justify-content:space-between;gap:8px;padding-top:9px}.uv-detected{font-size:11px;color:#a8b5c6}.uv-tabs{display:flex;gap:4px;flex-wrap:wrap;min-width:0}.uv-tabs button{padding:3px 6px}.uv-tabs button[aria-pressed=true]{color:#edf2f8;background:#2d3744;font-weight:600}.uv-tab-panel{padding:8px 0 12px}.uv-main-value{font-size:24px;letter-spacing:-.6px}.uv-main-value small{font-size:11px;letter-spacing:0;font-weight:400;color:#a8b5c6}.uv-credit{margin-top:15px;font-size:12px}.uv-empty{font-size:12px;color:#a8b5c6;padding:2px 0;overflow-wrap:anywhere}.uv-connect{color:#73dec1;padding:0;min-height:24px;text-decoration:underline}.uv-warning{color:#efc77f;font-size:11px;margin-top:6px}.uv-tab-panel .uv-warning{margin-bottom:6px}.uv-details{margin-top:12px}.uv-subtle{opacity:.75}.uv-unsupported{padding:8px 0}.uv-unsupported .uv-brand{margin:0}.uv-unsupported .uv-small{padding:4px 0 0 25px}#app{width:100%}
+header,footer,.uv-line,.uv-brand,.uv-actions{display:flex;align-items:center;justify-content:space-between;gap:8px}header{padding-bottom:10px}.uv-actions{gap:2px;flex-shrink:0}.uv-provider{padding:12px 0;border-top:1px solid #303946}.uv-brand{justify-content:flex-start;margin-bottom:9px}.uv-brand>.uv-muted{margin-left:auto;font-size:11px}.uv-muted{color:#a8b5c6;font-weight:400}.uv-mark{width:17px;text-align:center;font-weight:600}.uv-codex{color:#73dec1}.uv-claude{color:#dfaa8b}.uv-small{font-size:11px}.uv-track{height:4px;background:#303946;margin:7px 0 6px;border-radius:2px;overflow:hidden}.uv-track>span{display:block;height:100%;background:#73dec1}.uv-cl-track>span{background:#dfaa8b}.uv-stale .uv-track>span{background:#7d8898}.uv-line{min-width:0}.uv-line>span{min-width:0}.uv-line>strong{flex-shrink:0}
+footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10px;flex-wrap:wrap;gap:6px}.uv-view-toggle{display:flex;align-items:center;gap:6px;font-size:11px;color:#a8b5c6;cursor:pointer}.uv-view-toggle input{margin:0;width:12px;height:12px;accent-color:#73dec1;cursor:pointer}.uv-controls{display:flex;align-items:center;justify-content:space-between;gap:8px;padding-top:9px}.uv-detected{font-size:11px;color:#a8b5c6}.uv-tabs{display:flex;gap:4px;flex-wrap:wrap;min-width:0}.uv-tabs button{padding:3px 6px}.uv-tabs button[aria-pressed=true]{color:#edf2f8;background:#2d3744;font-weight:600}.uv-tab-panel{padding:8px 0 12px}.uv-main-value{font-size:24px;letter-spacing:-.6px}.uv-main-value small{font-size:11px;letter-spacing:0;font-weight:400;color:#a8b5c6}.uv-credit{margin-top:15px;font-size:12px}.uv-empty{font-size:12px;color:#a8b5c6;padding:2px 0;overflow-wrap:anywhere}.uv-connect{color:#73dec1;padding:0;min-height:24px;text-decoration:underline}.uv-warning{color:#efc77f;font-size:11px;margin-top:6px}.uv-tab-panel .uv-warning{margin-bottom:6px}.uv-subtle{opacity:.75}.uv-unsupported{padding:8px 0}.uv-unsupported .uv-brand{margin:0}.uv-unsupported .uv-small{padding:4px 0 0 25px}#app{width:100%}
 .uv-window.uv-docked{border-top:0;border-radius:0 0 12px 12px;padding-top:12px}
 .uv-limits{font-size:10px;color:#a8b5c6;margin:0 0 7px;overflow-wrap:anywhere}
 .uv-track.uv-low>span{background:#f88b98}.uv-track.uv-critical>span{background:#ff697e}.uv-alert-note{margin:7px 0;padding:6px 8px;border-radius:5px;background:#3d202a;color:#ffbdc5;font-size:11px;overflow-wrap:anywhere}.uv-alert-note.uv-critical{background:#5c2430;color:#ffd8dd}
-.uv-pacing{margin-top:10px;padding:8px 9px;border-left:2px solid #697b91;border-radius:4px;background:#202833;overflow-wrap:anywhere}.uv-pacing strong{display:block;font-size:12px;font-weight:600}.uv-pacing p{margin:3px 0 0;font-size:11px;color:#b6c3d2;white-space:pre-line}.uv-pacing small{display:block;margin-top:4px;color:#91a1b5;font-size:10px}.uv-pacing.uv-comfortable{border-color:#73dec1;background:#1c302d}.uv-comfortable strong{color:#91ead3}.uv-pacing.uv-caution{border-color:#efc77f}.uv-caution strong{color:#efc77f}.uv-pacing.uv-low{border-color:#f88b98}.uv-low strong{color:#ffbdc5}.uv-unavailable strong{color:#a8b5c6}
+.uv-baseline{margin-top:9px;font-size:11px;color:#a8b5c6}.uv-baseline-track>span{background:#78828f}.uv-weekly-status{margin-top:6px;font-size:11px;overflow-wrap:anywhere}.uv-help{margin-top:10px;color:#a8b5c6;font-size:11px;overflow-wrap:anywhere}.uv-help summary{cursor:pointer;min-height:26px;line-height:26px}.uv-help summary:focus-visible{outline:2px solid #73dec1}.uv-help p{margin:3px 0 0}.uv-limit{margin-top:12px;overflow-wrap:anywhere}.uv-limit:first-child{margin-top:0}.uv-caution{color:#efc77f}
 </style></head>
 <body><main id="app" class="uv-window" aria-label="AI 사용량"><header><strong>Usage</strong></header><div class="uv-empty">설치된 AI 확인 중…</div></main>
 <script>
 (()=>{
  const app=document.getElementById('app');
+ const helpOpen=new Set();
  let state={showBoth:true,activeProvider:'codex',providers:[],refreshing:false};
  const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
  const percent=n=>Number.isFinite(n)&&n>=0&&n<=100?Number(n).toLocaleString('en-US',{maximumFractionDigits:1})+'%':'—';
@@ -25,31 +26,35 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
  function actions(){return '<div class="uv-actions"><button type="button" data-action="refresh" aria-label="새로고침" '+(state.refreshing?'disabled':'')+'>'+refreshIcon+'</button><button type="button" data-action="hide" aria-label="숨기기">'+closeIcon+'</button></div>'}
  function tabs(){return '<div class="uv-tabs" role="group" aria-label="서비스 선택">'+state.providers.map(p=>'<button type="button" data-provider="'+esc(p.id)+'" aria-pressed="'+(p.id===state.activeProvider)+'">'+esc(p.name)+'</button>').join('')+'</div>'}
  function brand(p){return '<div class="uv-brand"><span class="uv-mark uv-'+esc(p.id)+'">'+(p.id==='codex'?'C':p.id==='claude'?'✳':'·')+'</span><strong>'+esc(p.name)+'</strong><span class="uv-muted">'+esc(p.plan||'감지됨')+'</span></div>'}
- function meter(p,w){if(w.invalid)return '<div class="uv-small uv-muted">잔여량 확인 필요</div>';return '<div class="uv-track '+(p.id==='claude'?'uv-cl-track ':'')+(w.alert==='critical'?'uv-critical':w.alert==='warning'?'uv-low':'')+'"><span style="width:'+(w.expired||w.invalid?0:Math.max(0,Math.min(100,w.remaining)))+'%"></span></div>'}
+ function meter(p,w){if(w.invalid||w.expired)return '<div class="uv-small uv-muted">'+(w.invalid?'잔여량 확인 필요':'새 수신 필요')+'</div>';return '<div class="uv-track '+(p.id==='claude'?'uv-cl-track ':'')+(w.alert==='critical'?'uv-critical':w.alert==='warning'?'uv-low':'')+'"><span style="width:'+(w.expired||w.invalid?0:Math.max(0,Math.min(100,w.remaining)))+'%"></span></div>'}
  function alertNotice(p){const low=p.windows.filter(w=>w.alert==='critical'||w.alert==='warning').sort((a,b)=>a.remaining-b.remaining);if(!low.length)return '';const w=low[0],critical=w.alert==='critical';return '<div class="uv-alert-note '+(critical?'uv-critical':'')+'">! '+(critical?'레드 얼럿':'사용량 주의')+' · '+esc(w.shortName)+' '+percent(w.remaining)+' 남음</div>'}
- function pacing(p){if(!p.pacing)return '';const a=p.pacing;return '<aside class="uv-pacing uv-'+esc(a.level)+'" aria-label="사용 여유 안내"><strong>'+esc(a.message)+'</strong><p>'+esc(a.detail)+'</p>'+(a.level==='unavailable'?'':'<small>'+esc(a.basis)+'</small>')+'</aside>'}
+ function pacing(p){if(!p.pacing)return '';const a=p.pacing;return (a.level==='unavailable'&&!p.windows.some(w=>w.weekly)?'<div class="uv-warning">'+esc(a.reason||a.message)+'</div>':'')+'<details class="uv-help" data-help="'+esc(p.id)+'" '+(helpOpen.has(p.id)?'open':'')+'><summary>기준선은 뭔가요?</summary><p>'+esc(a.basis)+'</p></details>'}
+ function limit(p,w,large){
+  const value=w.expired||w.invalid?'갱신 필요':percent(w.remaining)+' <small>남음</small>';
+  let html='<div class="uv-limit"><div class="uv-line"><span class="uv-muted">'+esc(w.name)+'</span><strong class="'+(large||w.weekly?'uv-main-value':'')+'">'+value+'</strong></div>'+meter(p,w);
+  if(w.weekly){
+   if(Number.isInteger(w.baseline))html+='<div class="uv-line uv-baseline"><span>오늘의 기준선</span><span>'+percent(w.baseline)+' 남음</span></div><div class="uv-track uv-baseline-track"><span style="width:'+w.baseline+'%"></span></div><div class="uv-weekly-status">'+esc(w.pacingMessage)+(w.endsAtReset?' · 초기화 전 기준':'')+'</div>';
+   else html+='<div class="uv-warning">기준선 확인 필요 · '+esc(w.pacingReason||'최신 주간 정보 필요')+'</div>';
+  }
+  if(w.shortTermWarning)html+='<div class="uv-warning">'+esc(w.shortTermWarning)+'</div>';
+  if(!w.weekly&&w.pacingReason)html+='<div class="uv-warning">'+esc(w.pacingReason)+'</div>';
+  return html+'<div class="uv-small uv-muted">'+esc(w.resetText)+'</div></div>';
+ }
+ function usage(p,large){
+  let html=p.windows.length?p.windows.map((w,i)=>limit(p,w,large&&i===0)).join(''):empty(p);
+  if(p.credits!=null)html+='<div class="uv-line uv-credit"><span class="uv-muted">크레딧</span><strong>'+esc(p.credits)+'</strong></div>';
+  if(p.windows.length&&(p.error||p.stale))html+='<div class="uv-warning">'+esc(p.error||'이전 수신 값')+'</div>'+(p.canConnect?'<button type="button" class="uv-connect" data-action="connect" data-id="'+esc(p.id)+'">다시 연결</button>':'');
+  return html+alertNotice(p)+pacing(p);
+ }
  function coverage(p){return p.coverage?'<div class="uv-limits">'+esc(p.coverage)+'</div>':''}
  function empty(p){return '<div class="uv-empty">'+esc(p.error||'사용량 확인 중…')+'</div>'+(p.canConnect?'<button type="button" class="uv-connect" data-action="connect" data-id="'+esc(p.id)+'">'+(p.id==='codex'?'ChatGPT 연결하기':'연결하기')+'</button>':'')}
  function combined(p){
   if(!p.supported)return '<section class="uv-provider uv-unsupported">'+brand(p)+'<div class="uv-muted uv-small">감지됨 · 사용량 연동 미지원</div></section>';
-  const w=p.windows[0];
-  let content=w?'<div class="uv-line"><span>'+esc(w.shortName)+'</span><strong>'+(w.expired||w.invalid?'갱신 필요':percent(w.remaining)+' <span class="uv-muted">남음</span>')+'</strong></div>'+meter(p,w):empty(p);
-  if(w){const extra=p.windows[1];let trailing=p.credits!=null?esc(p.credits)+' 크레딧':extra?esc(extra.shortName)+' '+(extra.expired||extra.invalid?'갱신 필요':percent(extra.remaining)+' 남음'):'';
-   content+='<div class="uv-line uv-meta uv-small uv-muted"><span>'+esc(w.resetText)+'</span><span class="uv-extra" '+(extra?'title="'+esc(extra.resetText)+'"':'')+'>'+trailing+'</span></div>';
-   if(p.windows.length>2)content+='<div class="uv-small uv-muted uv-details">'+p.windows.slice(2).map(v=>esc(v.shortName)+' '+(v.expired||v.invalid?'갱신 필요':percent(v.remaining)+' 남음')).join(' · ')+'</div>';
-   if(p.error)content+='<div class="uv-warning">'+esc(p.error)+'</div>'+(p.canConnect?'<button type="button" class="uv-connect" data-action="connect" data-id="'+esc(p.id)+'">다시 연결</button>':'');
-   if(p.stale)content+='<div class="uv-warning">이전 수신 값 · '+esc(p.updated)+'</div>';
-  }
-  return '<section class="uv-provider '+(p.stale?'uv-stale':'')+'">'+brand(p)+coverage(p)+alertNotice(p)+content+pacing(p)+'</section>';
+  return '<section class="uv-provider '+(p.stale?'uv-stale':'')+'">'+brand(p)+coverage(p)+usage(p,false)+'</section>';
  }
  function tabbed(p){
   if(!p.supported)return '<section class="uv-tab-panel">'+empty(p)+'</section>';
-  const w=p.windows[0];if(!w)return '<section class="uv-tab-panel">'+coverage(p)+empty(p)+pacing(p)+'</section>';
-  let html='<section class="uv-tab-panel '+(p.stale?'uv-stale':'')+'">'+coverage(p)+'<div class="uv-line"><span class="uv-muted">'+esc(w.name)+'</span><strong class="uv-main-value">'+(w.expired||w.invalid?'—':percent(w.remaining))+' <small>'+(w.expired||w.invalid?'갱신 필요':'남음')+'</small></strong></div>'+meter(p,w)+'<div class="uv-small uv-muted">'+esc(w.resetText)+'</div>';
-  if(p.credits!=null)html+='<div class="uv-line uv-credit"><span class="uv-muted">크레딧</span><strong>'+esc(p.credits)+'</strong></div>';
-  for(const next of p.windows.slice(1))html+='<div class="uv-line uv-credit"><span class="uv-muted">'+esc(next.name)+'</span><strong>'+(next.expired||next.invalid?'갱신 필요':percent(next.remaining)+' 남음')+'</strong></div><div class="uv-small uv-muted">'+esc(next.resetText)+'</div>';
-  if(p.error||p.stale)html+='<div class="uv-warning">'+esc(p.error||'이전 수신 값')+'</div>'+(p.canConnect?'<button type="button" class="uv-connect" data-action="connect" data-id="'+esc(p.id)+'">다시 연결</button>':'');
-  return html+alertNotice(p)+pacing(p)+'</section>';
+  return '<section class="uv-tab-panel '+(p.stale?'uv-stale':'')+'">'+coverage(p)+usage(p,true)+'</section>';
  }
  function render(){
   app.classList.toggle('uv-docked',state.docked===true);
@@ -63,6 +68,7 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
   if(button.dataset.provider){state.activeProvider=button.dataset.provider;send({type:'provider',id:state.activeProvider});render();return}
   send({type:button.dataset.action,id:button.dataset.id});
  });
+ app.addEventListener('toggle',e=>{if(e.target.matches('details[data-help]')){if(e.target.open)helpOpen.add(e.target.dataset.help);else helpOpen.delete(e.target.dataset.help);resize()}},true);
  app.addEventListener('change',e=>{if(e.target.id==='show-both'){state.showBoth=e.target.checked;send({type:'mode',showBoth:state.showBoth});render()}});
  window.usageViewer={update(data){state=data;render()}};
  window.addEventListener('resize',resize);

@@ -15,8 +15,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly UsagePopup _popup = new UsagePopup();
     private readonly TopUsageBar _topBar = new TopUsageBar();
     private readonly UsageAlertMonitor _alerts = new UsageAlertMonitor();
-    private readonly Task<UsageDailyBudgetAdvisor> _dailyBudgets = Task.Run(() =>
-        new UsageDailyBudgetAdvisor(new UsageDailyBudgetStore()));
     private readonly UsageAlertSound _alertSound = new UsageAlertSound();
     private readonly UsageAlertToast _alertToast = new UsageAlertToast();
     private readonly NotifyIcon _tray;
@@ -38,8 +36,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private string? _claudeError = "한 번 연결하면 자동으로 갱신됩니다.";
     private bool _claudeStale;
     private bool _claudeReading;
-    private bool _budgetUpdating;
-    private bool _budgetUpdateRequested;
     private DateTimeOffset _lastCodexAttempt;
     private DateTimeOffset _lastClaudeWebRefresh;
     private ClaudeConnectionWindow? _claudeConnection;
@@ -331,53 +327,21 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    private async void UpdatePopup()
+    private void UpdatePopup()
     {
-        _budgetUpdateRequested = true;
-        if (_budgetUpdating == true || _exiting == true)
+        if (_exiting == true)
         {
             return;
         }
 
-        _budgetUpdating = true;
-        try
-        {
-            // Serialize state transitions off the UI thread and coalesce updates received during disk I/O.
-            UsageDailyBudgetAdvisor advisor = await _dailyBudgets;
-            while (_budgetUpdateRequested == true && _exiting == false)
-            {
-                _budgetUpdateRequested = false;
-                UsageSnapshot? codex = _snapshot;
-                UsageSnapshot? claude = _claudeSnapshot;
-                string? codexError = _error;
-                string? claudeError = _claudeError;
-                bool claudeStale = _claudeStale;
-                var advice = await Task.Run(() =>
-                {
-                    DateTimeOffset now = DateTimeOffset.UtcNow;
-                    TimeZoneInfo.ClearCachedData();
-                    TimeZoneInfo zone = TimeZoneInfo.Local;
-                    UsageDailyBudget codexBudget = advisor.Evaluate("codex", codex, codexError, false, now, zone);
-                    UsageDailyBudget claudeBudget = advisor.Evaluate("claude", claude, claudeError, claudeStale, now, zone);
-                    return (Codex: UsagePacingAdvisor.Evaluate(codex, codexError, false, now, codexBudget),
-                            Claude: UsagePacingAdvisor.Evaluate(claude, claudeError, claudeStale, now, claudeBudget));
-                });
-                if (_budgetUpdateRequested == true || _exiting == true)
-                {
-                    continue;
-                }
-
-                _popup.SetState(codex, _refreshing, codexError, claude, claudeError, claudeStale,
-                                advice.Codex, advice.Claude);
-                _topBar.SetUsage(_installed, codex, codexError, claude, claudeError, claudeStale,
-                                 advice.Codex, advice.Claude);
-                UpdateUsageAlerts();
-            }
-        }
-        finally
-        {
-            _budgetUpdating = false;
-        }
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        TimeZoneInfo.ClearCachedData();
+        TimeZoneInfo zone = TimeZoneInfo.Local;
+        UsagePacingAdvice codex = UsagePacingAdvisor.Evaluate(_snapshot, _error, false, now, zone);
+        UsagePacingAdvice claude = UsagePacingAdvisor.Evaluate(_claudeSnapshot, _claudeError, _claudeStale, now, zone);
+        _popup.SetState(_snapshot, _refreshing, _error, _claudeSnapshot, _claudeError, _claudeStale, codex, claude);
+        _topBar.SetUsage(_installed, _snapshot, _error, _claudeSnapshot, _claudeError, _claudeStale, codex, claude);
+        UpdateUsageAlerts();
     }
 
     private void UpdateUsageAlerts()

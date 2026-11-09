@@ -334,6 +334,7 @@ internal sealed class UsagePopup : Form
         {
             ProviderUsageState state = app.Id == "codex" ? _codex : _claude;
             UsageSnapshot? snapshot = app.UsageSupported == true ? state.Snapshot : null;
+            UsagePacingAdvice advice = state.Advice ?? new UsagePacingAdvice(UsagePacingLevel.Unavailable);
             List<object> windows = new List<object>();
             if (snapshot != null)
             {
@@ -350,6 +351,8 @@ internal sealed class UsagePopup : Form
 
                     bool valid = double.IsFinite(window.UsedPercent) == true &&
                                  window.UsedPercent >= 0 && window.UsedPercent <= 100;
+                    UsagePacingItem? comparison = (advice.Weekly ?? []).Concat(advice.ShortTerm ?? [])
+                        .FirstOrDefault(item => item.BucketId == bucket.Id && ReferenceEquals(item.Window, window));
                     windows.Add(new
                     {
                         name,
@@ -359,13 +362,19 @@ internal sealed class UsagePopup : Form
                         alert = UsageAlertPolicy.IsFresh(snapshot, state.Error, state.IsStale, DateTimeOffset.UtcNow) == true ?
                                 UsageAlertPolicy.GetLevel(window, DateTimeOffset.UtcNow).ToString().ToLowerInvariant() : "none",
                         expired = UsageDisplayHelper.IsExpired(window),
-                        resetText = UsageDisplayHelper.FormatReset(window)
+                        resetText = UsageDisplayHelper.FormatReset(window),
+                        weekly = window.DurationMinutes == 10080,
+                        baseline = comparison?.Baseline,
+                        endsAtReset = comparison?.EndsAtReset == true,
+                        pacingReason = comparison?.Reason,
+                        pacingMessage = comparison?.Baseline != null ?
+                                        UsageDisplayHelper.GetWeeklyMessage(comparison.Level) : null,
+                        shortTermWarning = comparison != null ? UsageDisplayHelper.FormatShortTermWarning(comparison) : ""
                     });
                 }
             }
 
             CreditBalance? credits = snapshot?.Buckets.FirstOrDefault()?.Credits;
-            UsagePacingAdvice advice = state.Advice ?? new UsagePacingAdvice(UsagePacingLevel.Unavailable);
             string? balance = app.Id != "codex" || snapshot == null ? null :
                               credits?.Unlimited == true ? "무제한" :
                               credits?.Balance?.ToString("#,0.##", CultureInfo.InvariantCulture) ??
@@ -384,13 +393,16 @@ internal sealed class UsagePopup : Form
                 pacing = new
                 {
                     level = advice.Level.ToString().ToLowerInvariant(),
+                    reason = advice.Reason,
                     message = UsageDisplayHelper.GetPacingMessage(advice),
                     detail = UsageDisplayHelper.FormatPacingDetails(advice),
                     basis = UsageDisplayHelper.FormatPacingBasis(advice)
                 },
                 credits = balance,
                 error = app.UsageSupported == true ? state.Error : "감지됨 · 사용량 연동 미지원",
-                stale = app.UsageSupported == true && (state.IsStale == true || state.Error != null),
+                stale = app.UsageSupported == true && (state.IsStale == true || state.Error != null ||
+                        (snapshot != null && (snapshot.RetrievedAt > DateTimeOffset.UtcNow ||
+                         DateTimeOffset.UtcNow - snapshot.RetrievedAt > TimeSpan.FromMinutes(15)))),
                 updated = snapshot?.RetrievedAt.ToLocalTime().ToString("HH:mm")
             });
         }

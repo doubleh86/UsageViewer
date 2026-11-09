@@ -165,7 +165,8 @@ internal sealed class TopUsageBar : Form
             return new TopBarMetric(provider, "", missing, true);
         }
 
-        if (stale == true || error != null)
+        if (stale == true || error != null || snapshot.RetrievedAt > DateTimeOffset.UtcNow ||
+            DateTimeOffset.UtcNow - snapshot.RetrievedAt > TimeSpan.FromMinutes(15))
         {
             return new TopBarMetric(provider, "", "갱신 필요", true);
         }
