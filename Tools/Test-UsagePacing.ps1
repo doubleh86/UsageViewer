@@ -306,11 +306,8 @@ internal static class PacingProbe
                   "popup real DLL remaining/average payload");
             Check(pacing.GetProperty("message").GetString() == Message(advice) && pacing.GetProperty("detail").GetString() == Details(advice),
                   "popup shared values");
-            Invoke(bar, "SetUsageTip", "codex", "Codex", snapshot, advice);
-            var tips = (IDictionary)bar.GetType().GetField("_usageTips", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(bar)!;
-            string tip = (string)tips["codex"]!;
-            Check(tip.Contains("76% 남음") && tip.Contains("약18%") && tip.Contains(Message(advice)), "tooltip same values/units/status");
-            Check(tip.Contains("남은 주간 한도를 초기화까지") && tip.Contains("%p") == false && tip.Contains("10%를") == false,
+            string basis = pacing.GetProperty("basis").GetString()!;
+            Check(basis.Contains("남은 주간 한도를 초기화까지") && basis.Contains("%p") == false && basis.Contains("10%를") == false,
                   "new basis no budget or reserve");
             foreach (double remaining in new[] { double.NaN, double.PositiveInfinity, -1, 101 })
             {
@@ -334,8 +331,7 @@ internal static class PacingProbe
                 using JsonDocument fixturePayload = JsonDocument.Parse(JsonSerializer.Serialize(Invoke(popup, "BuildDocumentState")));
                 string row = fixturePayload.RootElement.GetProperty("providers")[0].GetProperty("windows")[0]
                     .GetProperty("pacingMessage").GetString()!;
-                Invoke(bar, "SetUsageTip", "codex", "Codex", fixture, fixtureAdvice);
-                Check(row.Contains(expected) && ((string)tips["codex"]!).Contains(row), "popup and tooltip same reset/exhausted/tiny advice");
+                Check(row.Contains(expected), "popup reset/exhausted/tiny advice");
             }
             object claude = Snapshot(Start, Bucket("claude", Window(100, 300),
                 Window(94, 10080, DateTimeOffset.Parse("2026-11-15T12:00:00+09:00"))));

@@ -17,8 +17,6 @@ internal sealed class TopUsageBar : Form
 {
     private readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer { Interval = 150 };
     private readonly Font _textFont = new Font("Segoe UI", 9.75f);
-    private readonly ToolTip _usageToolTip = new ToolTip { InitialDelay = 600, AutoPopDelay = 12000, ShowAlways = true };
-    private readonly Dictionary<string, string> _usageTips = new Dictionary<string, string>();
     private readonly List<TopBarMetric> _metrics = new List<TopBarMetric>();
     private readonly Dictionary<string, UsageAlertLevel> _alertLevels = new Dictionary<string, UsageAlertLevel>();
     private bool _enabled;
@@ -80,14 +78,10 @@ internal sealed class TopUsageBar : Form
     }
 
     public void SetUsage(IReadOnlyList<DetectedAiApp> installed, UsageSnapshot? codex, string? codexError,
-                         UsageSnapshot? claude, string? claudeError, bool claudeStale,
-                         UsagePacingAdvice codexAdvice, UsagePacingAdvice claudeAdvice)
+                         UsageSnapshot? claude, string? claudeError, bool claudeStale)
     {
         _metrics.Clear();
         _alertLevels.Clear();
-        _usageTips.Clear();
-        SetUsageTip("codex", "Codex", codex, codexAdvice);
-        SetUsageTip("claude", "Claude", claude, claudeAdvice);
         SetAlertLevel("Codex", codex, codexError, false);
         SetAlertLevel("Claude", claude, claudeError, claudeStale);
         if (codex != null || installed.Any(app => app.Id == "codex") == true)
@@ -103,29 +97,7 @@ internal sealed class TopUsageBar : Form
         AccessibleName = _metrics.Count == 0 ? "사용량 조회 대기" :
                          string.Join(" / ", _metrics.Select(metric =>
                              $"{metric.Provider} {metric.Period} {metric.Value}"));
-        if (IsHandleCreated == true && _pressed == false)
-        {
-            UpdateUsageTip(PointToClient(Cursor.Position));
-        }
         Invalidate();
-    }
-
-    private void SetUsageTip(string id, string name, UsageSnapshot? snapshot, UsagePacingAdvice advice)
-    {
-        _usageTips[id] = name + " · " + UsageDisplayHelper.GetPacingMessage(advice) + "\n" +
-                         UsageDisplayHelper.FormatLimitCoverage(snapshot) + "\n" +
-                         UsageDisplayHelper.FormatPacingDetails(advice) + "\n" +
-                         UsageDisplayHelper.FormatPacingBasis(advice);
-    }
-
-    private void UpdateUsageTip(Point point)
-    {
-        string? provider = GetProviderAt(point);
-        string tip = provider != null && _usageTips.TryGetValue(provider, out string? text) == true ? text : "";
-        if (_usageToolTip.GetToolTip(this) != tip)
-        {
-            _usageToolTip.SetToolTip(this, tip);
-        }
     }
 
     private void SetAlertLevel(string provider, UsageSnapshot? snapshot, string? error, bool stale)
@@ -330,7 +302,6 @@ internal sealed class TopUsageBar : Form
         }
 
         _pressed = true;
-        _usageToolTip.Active = false;
         _dragging = false;
         _pressPoint = Cursor.Position;
         _grabOffset = _pressPoint.X - Left;
@@ -341,10 +312,6 @@ internal sealed class TopUsageBar : Form
     {
         base.OnMouseMove(e);
         MoveDock(Cursor.Position);
-        if (_pressed == false)
-        {
-            UpdateUsageTip(e.Location);
-        }
     }
 
     private void MoveDock(Point cursor)
@@ -382,7 +349,6 @@ internal sealed class TopUsageBar : Form
         bool moved = _dragging;
         _pressed = false;
         _dragging = false;
-        _usageToolTip.Active = true;
         Capture = false;
         Cursor = Cursors.Default;
         if (moved == true)
@@ -429,7 +395,6 @@ internal sealed class TopUsageBar : Form
             bool moved = _dragging;
             _pressed = false;
             _dragging = false;
-            _usageToolTip.Active = true;
             Cursor = Cursors.Default;
             if (moved == true)
             {
@@ -607,7 +572,6 @@ internal sealed class TopUsageBar : Form
         if (disposing == true)
         {
             _timer.Dispose();
-            _usageToolTip.Dispose();
             _textFont.Dispose();
         }
 
