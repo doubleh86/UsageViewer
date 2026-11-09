@@ -37,19 +37,39 @@ internal static class UsageDisplayHelper
 
     public static string GetPacingMessage(UsagePacingAdvice advice)
     {
-        string message = GetWeeklyMessage(advice.Level);
-        return advice.Limiting?.BucketName is string name ? name + " · " + message : message;
+        if (advice.Level == UsagePacingLevel.Unavailable || advice.Limiting == null)
+        {
+            return "추천 페이스 보류 · " + (advice.Reason ?? "최신 주간 정보 필요");
+        }
+
+        string message = GetWeeklyMessage(advice.Limiting);
+        return advice.Limiting.BucketName is string name ? name + " · " + message : message;
     }
 
-    public static string GetWeeklyMessage(UsagePacingLevel level)
+    public static string GetWeeklyMessage(UsagePacingItem item)
     {
-        return level switch
+        return item.Level switch
         {
-            UsagePacingLevel.Comfortable => "주간 한도는 여유 있어요",
-            UsagePacingLevel.Balanced => "주간 한도를 고르게 쓰고 있어요",
-            UsagePacingLevel.Caution => "주간 한도를 빠르게 쓰고 있어요",
-            _ => "주간 기준선 확인 필요"
+            UsagePacingLevel.Recommended => "추천 페이스: 24시간에 약" +
+                                           FormatPacingPercent(item.Average24Hours!.Value),
+            UsagePacingLevel.UntilReset => "초기화까지 남은 " +
+                                          FormatPercent(item.Window.RemainingPercent) +
+                                          (item.Window.RemainingPercent < 0.1 ? "을" : "를") + " 나눠 쓰세요",
+            UsagePacingLevel.Exhausted => "주간 한도 소진 · 초기화를 기다려 주세요",
+            _ => "추천 페이스 보류 · " + (item.Reason ?? "최신 주간 정보 필요")
         };
+    }
+
+    private static string FormatPacingPercent(decimal percent)
+    {
+        if (percent > 0 && percent < 0.1m)
+        {
+            return "0.1% 미만";
+        }
+
+        int digits = percent < 1 ? 1 : 0;
+        return decimal.Round(percent, digits, MidpointRounding.AwayFromZero)
+            .ToString("0.#", CultureInfo.InvariantCulture) + "%";
     }
 
     public static string FormatPacingDetails(UsagePacingAdvice advice)
@@ -67,11 +87,11 @@ internal static class UsageDisplayHelper
                            item.Window.UsedPercent >= 0 && item.Window.UsedPercent <= 100 ?
                            FormatPercent(item.Window.RemainingPercent) + " 남음" : "잔여량 확인 필요";
             lines.Add(name + " · " + value);
-            if (item.Baseline != null)
+            if (item.Window.DurationMinutes == 10080)
             {
-                lines.Add($"오늘의 기준선 {item.Baseline}% 남음" + (item.EndsAtReset == true ? " · 초기화 전 기준" : ""));
+                lines.Add(GetWeeklyMessage(item));
             }
-            if (item.Reason != null)
+            else if (item.Reason != null)
             {
                 lines.Add(item.Reason);
             }
@@ -98,12 +118,18 @@ internal static class UsageDisplayHelper
 
     public static string FormatPacingBasis(UsagePacingAdvice advice)
     {
-        return "한 주의 한도를 고르게 썼을 때 오늘 자정에 남아 있을 양이에요." +
+        return "남은 주간 한도를 초기화까지 고르게 나눠 쓸 때의 평균이에요. " +
+               "연속 24시간당 주간 한도의 비율이며, 사용을 보장하지 않아요." +
                (advice.ShortTerm?.Count > 0 ? " 5시간 한도는 따로 적용돼요." : "");
     }
 
     public static string FormatPercent(double percent)
     {
+        if (percent > 0 && percent < 0.1)
+        {
+            return "0.1% 미만";
+        }
+
         return Math.Round(percent, 1, MidpointRounding.AwayFromZero).ToString("0.#", CultureInfo.InvariantCulture) + "%";
     }
 

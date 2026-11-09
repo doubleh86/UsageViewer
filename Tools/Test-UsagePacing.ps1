@@ -33,9 +33,8 @@ internal static class PacingProbe
     private static string _root = "";
     private static int _passed;
     private static string _document = "";
-    private static readonly DateTimeOffset Start = DateTimeOffset.Parse("2026-11-09T16:10:00+09:00");
+    private static readonly DateTimeOffset Start = DateTimeOffset.Parse("2026-11-09T18:12:00+09:00");
     private static readonly DateTimeOffset Reset = DateTimeOffset.Parse("2026-11-14T01:10:00+09:00");
-    private static readonly TimeZoneInfo Korea = TimeZoneInfo.FindSystemTimeZoneById("Korea Standard Time");
 
     [STAThread]
     public static int Main(string[] args)
@@ -91,11 +90,11 @@ internal static class PacingProbe
         "synthetic", ArrayOf("Models.UsageBucket", buckets), at);
     private static object Sample(double remaining = 76) => Snapshot(Start, Bucket("weekly", Week(remaining)));
     private static object Evaluate(object? snapshot, DateTimeOffset? now = null, string? error = null,
-                                   bool stale = false, TimeZoneInfo? zone = null) =>
-        Static("Services.UsagePacingAdvisor", "Evaluate", snapshot, error, stale, now ?? Start, zone ?? Korea);
+                                   bool stale = false) =>
+        Static("Services.UsagePacingAdvisor", "Evaluate", snapshot, error, stale, now ?? Start);
     private static object[] Items(object advice, string property = "Weekly") =>
         ((IEnumerable?)Get(advice, property))?.Cast<object>().ToArray() ?? [];
-    private static int? Baseline(object advice) => (int?)Get(Items(advice).Single(), "Baseline");
+    private static decimal? Average(object advice) => (decimal?)Get(Items(advice).Single(), "Average24Hours");
     private static string Level(object advice) => Get(advice, "Level")!.ToString()!;
     private static string Message(object advice) => (string)Static("UI.UsageDisplayHelper", "GetPacingMessage", advice);
     private static string Details(object advice) => (string)Static("UI.UsageDisplayHelper", "FormatPacingDetails", advice);
@@ -111,50 +110,54 @@ internal static class PacingProbe
     {
         Check(Level(advice) == "Unavailable" && Get(advice, "Limiting") == null &&
               string.IsNullOrEmpty((string?)Get(advice, "Reason")) == false, label);
-        Check(Items(advice).All(item => Get(item, "Baseline") == null), label + " no fabricated baseline");
+        Check(Items(advice).All(item => Get(item, "Average24Hours") == null), label + " no fabricated average");
         Check(Message(advice).Contains("여유") == false, label + " no success");
     }
 
     private static void CheckExamples()
     {
         object codex = Evaluate(Sample());
-        Check(Baseline(codex) == 58 && Level(codex) == "Comfortable", "approved Codex 76 / 58");
-        Check(Details(codex).Contains("76% 남음") && Details(codex).Contains("58% 남음"), "remaining units");
-        Check(Message(codex) == "주간 한도는 여유 있어요", "concise weekly status");
+        Check(Math.Abs(Average(codex)!.Value - 17.714m) < 0.001m, "approved average 76 / 102h58m");
+        Check(Details(codex).Contains("76% 남음"), "remaining units");
+        Check(Message(codex) == "추천 페이스: 24시간에 약18%", "concise weekly average");
+        Check(Math.Abs(Average(Evaluate(Sample(60)))!.Value / Average(codex)!.Value - 60m / 76m) < 0.00001m,
+              "remaining changes proportional average");
+        Check(Average(Evaluate(Sample(), Start.AddMinutes(5))) > Average(codex), "time changes recalculate");
         foreach (bool reverse in new[] { false, true })
         {
             object week = Window(94, 10080, DateTimeOffset.Parse("2026-11-15T12:00:00+09:00"));
             object shortTerm = Window(100, 300);
             object snapshot = Snapshot(Start, Bucket("claude", reverse ? week : shortTerm, reverse ? shortTerm : week));
             object advice = Evaluate(snapshot);
-            Check(Baseline(advice) == 79 && Level(advice) == "Comfortable", "Claude weekly valid without short reset / order");
+            Check(Level(advice) == "Recommended" && Message(advice) == "추천 페이스: 24시간에 약16%",
+                  "weekly valid without short reset / order");
             Check(Details(advice).Contains("100% 남음") && Details(advice).Contains("94% 남음") &&
-                  Details(advice).Contains("79% 남음") && Details(advice).Contains("시각 미제공"), "Claude separate limits");
-            Check(Items(advice, "ShortTerm").All(item => Get(item, "Baseline") == null), "no daily baseline on short limit");
+                  Details(advice).Contains("시각 미제공"), "separate limits");
+            Check(Items(advice, "ShortTerm").All(item => Get(item, "Average24Hours") == null), "no short average");
         }
-        foreach (double remaining in new[] { 58d, 57.9, 58.1 })
-        {
-            string expected = remaining == 58 ? "Balanced" : remaining < 58 ? "Caution" : "Comfortable";
-            Check(Level(Evaluate(Sample(remaining))) == expected, "compare displayed baseline " + remaining);
-        }
-        Check(Level(Evaluate(Sample(57.99))) == "Balanced", "display rounding agrees with status");
         foreach (double remaining in new[] { 0d, 5, 10, 10.1 })
         {
             object advice = Evaluate(Snapshot(Start, Bucket("claude", Window(remaining, 300), Week(94))));
             string warning = (string)Static("UI.UsageDisplayHelper", "FormatShortTermWarning", Items(advice, "ShortTerm")[0]);
-            Check(Baseline(advice) == 58 && Level(advice) == "Comfortable", "short warning independent of weekly");
+            Check(Level(advice) == "Recommended", "short warning independent of weekly");
             Check((warning.Length > 0) == (remaining <= 10), "short 10 percent threshold");
             Check(warning.Contains("소진") == (remaining == 0), "short exhaustion");
             Check(warning.Contains("매우") == (remaining > 0 && remaining <= 5), "short critical threshold");
         }
-        object multi = Snapshot(Start, Bucket("a", Week(76), name: "Model A"),
-            Bucket("b", Window(70, 10080, DateTimeOffset.Parse("2026-11-15T12:00:00+09:00")), name: "Model B"));
-        object multiple = Evaluate(multi);
-        Check(Items(multiple).Select(item => (int?)Get(item, "Baseline")).SequenceEqual(new int?[] { 58, 79 }), "per-model baselines");
-        Check((string?)Get(Get(multiple, "Limiting")!, "BucketName") == "Model B" && Message(multiple).Contains("Model B"), "least difference summary named");
+        foreach (bool reverse in new[] { false, true })
+        {
+            object a = Bucket("a", Week(76), name: "Model A");
+            object b = Bucket("b", Window(70, 10080, DateTimeOffset.Parse("2026-11-15T12:00:00+09:00")), name: "Model B");
+            object multiple = Evaluate(Snapshot(Start, reverse ? b : a, reverse ? a : b));
+            Check(Items(multiple).Length == 2 && Items(multiple).All(item => Get(item, "Average24Hours") != null), "per-model averages");
+            Check((string?)Get(Get(multiple, "Limiting")!, "BucketName") == "Model B" && Message(multiple).Contains("Model B"), "smallest average summary named / order");
+            Check(Details(multiple).Contains("Model A") && Details(multiple).Contains("Model B") &&
+                  Details(multiple).Contains("약18%") && Details(multiple).Contains("약12%"), "model averages never pooled");
+        }
         object partial = Evaluate(Snapshot(Start, Bucket("a", Week()), Bucket("b", Window(80))));
-        Check(Get(Items(partial)[0], "Baseline") is 58 && Get(Items(partial)[1], "Baseline") == null, "invalid model does not block valid model");
-        Check(Level(partial) == "Unavailable", "partial invalid summary avoids overall success");
+        Check(Get(Items(partial)[0], "Average24Hours") != null && Get(Items(partial)[1], "Average24Hours") == null,
+              "invalid model does not block valid model");
+        Check(Level(partial) == "Unavailable" && Message(partial).Contains("보류"), "partial invalid summary avoids overall success");
     }
 
     private static void CheckInvalid()
@@ -163,7 +166,7 @@ internal static class PacingProbe
         Hold(Evaluate(Sample(), error: "synthetic failure"), "query error");
         Hold(Evaluate(Sample(), stale: true), "stale");
         Hold(Evaluate(Sample(), Start.AddMinutes(15).AddTicks(1)), "older than 15 minutes");
-        Check(Baseline(Evaluate(Sample(), Start.AddMinutes(15))) == 58, "15-minute boundary inclusive");
+        Check(Average(Evaluate(Sample(), Start.AddMinutes(15))) != null, "15-minute boundary inclusive");
         Hold(Evaluate(Snapshot(Start.AddTicks(1), Bucket("a", Week()))), "any future reception");
         Hold(Evaluate(Snapshot(Start, Bucket("a", Window(50, 300)))), "weekly not supplied");
         Hold(Evaluate(Snapshot(Start, Bucket("a", Window(50, null, Reset)))), "weekly length missing");
@@ -176,64 +179,73 @@ internal static class PacingProbe
         {
             Hold(Evaluate(Snapshot(Start, Bucket("a", Window(76, 10080, reset)))), "invalid weekly reset");
         }
-        Check(Baseline(Evaluate(Snapshot(Start, Bucket("a", Window(76, 10080, Start.AddMinutes(10080)))))) != null,
+        Check(Average(Evaluate(Snapshot(Start, Bucket("a", Window(76, 10080, Start.AddMinutes(10080)))))) != null,
               "exact weekly length accepted");
         foreach (double remaining in new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity, -1, 101 })
         {
             Hold(Evaluate(Sample(remaining)), "invalid remaining");
-            Check(Baseline(Evaluate(Snapshot(Start, Bucket("a", Window(remaining, 300), Week())))) == 58,
+            Check(Average(Evaluate(Snapshot(Start, Bucket("a", Window(remaining, 300), Week())))) != null,
                   "invalid short percent does not block weekly");
         }
         Hold(Evaluate(Snapshot(Start, Bucket("a", Week(), Week()))), "ambiguous weekly pair");
         Hold(Evaluate(Snapshot(Start, Bucket("a", Week()), Bucket("a", Week()))), "duplicate bucket ids");
         Hold(Evaluate(Snapshot(Start, Bucket("", Week()))), "missing bucket identity");
         object expiredShort = Evaluate(Snapshot(Start, Bucket("a", Window(0, 300, Start), Week())));
-        Check(Baseline(expiredShort) == 58, "expired short does not block weekly");
+        Check(Average(expiredShort) != null, "expired short does not block weekly");
         Check((string)Static("UI.UsageDisplayHelper", "FormatShortTermWarning", Items(expiredShort, "ShortTerm")[0]) == "",
               "expired short does not claim present exhaustion");
     }
 
     private static void CheckTime()
     {
-        DateTimeOffset midnight = DateTimeOffset.Parse("2026-11-10T00:00:00+09:00");
-        foreach (DateTimeOffset reset in new[] { Start.AddHours(1), midnight })
+        foreach (TimeSpan duration in new[] { TimeSpan.FromTicks(1), TimeSpan.FromMinutes(1),
+                                             TimeSpan.FromHours(24).Subtract(TimeSpan.FromTicks(1)), TimeSpan.FromHours(24) })
         {
-            object advice = Evaluate(Snapshot(Start, Bucket("a", Window(76, 10080, reset))));
-            Check(Baseline(advice) == 0 && (bool)Get(Items(advice)[0], "EndsAtReset")!, "reset before or at midnight zero");
-            Check(Details(advice).Contains("초기화 전 기준"), "zero baseline scope");
+            object advice = Evaluate(Snapshot(Start, Bucket("a", Window(76, 10080, Start + duration))));
+            Check(Level(advice) == "UntilReset" && Message(advice) == "초기화까지 남은 76%를 나눠 쓰세요",
+                  "up to 24h including tiny interval");
         }
-        DateTimeOffset exact = midnight.AddTicks(TimeSpan.FromMinutes(10080).Ticks / 2);
-        Check(Baseline(Evaluate(Snapshot(Start, Bucket("a", Window(76, 10080, exact))))) == 50, "exact integer no epsilon");
-        Check(Baseline(Evaluate(Snapshot(Start, Bucket("a", Window(76, 10080, exact.AddTicks(1)))))) == 51, "one tick rounds up");
+        object over = Evaluate(Snapshot(Start, Bucket("a", Window(76, 10080, Start.AddHours(24).AddTicks(1)))));
+        Check(Level(over) == "Recommended" && Message(over).Contains("약76%"), "one tick beyond 24h");
+        foreach (int hours in new[] { 1, 24, 48, 168 })
+        {
+            object zero = Evaluate(Snapshot(Start, Bucket("a", Window(0, 10080, Start.AddHours(hours)))));
+            Check(Level(zero) == "Exhausted" && Average(zero) == 0 && Message(zero).Contains("소진"), "actual zero exhausted");
+        }
+        foreach ((double remaining, string text) in new[] {
+            (0.1, "0.1% 미만"), (0.199, "0.1% 미만"), (0.2, "0.1%"), (0.3, "0.2%"),
+            (1.89, "0.9%"), (1.9, "1%"), (1.999, "1%"), (2d, "1%"), (2.998, "1%"), (3d, "2%"), (3.002, "2%") })
+        {
+            object advice = Evaluate(Snapshot(Start, Bucket("a", Window(remaining, 10080, Start.AddHours(48)))));
+            Check(Message(advice) == "추천 페이스: 24시간에 약" + text, "percent precision / rounding " + remaining);
+            Check(Level(advice) == "Recommended", "positive tiny remaining never exhausted");
+        }
+        object smallest = New("Models.UsageWindow", double.BitDecrement(100d), (int?)10080, (DateTimeOffset?)Reset);
+        object smallestAdvice = Evaluate(Snapshot(Start, Bucket("tiny", smallest)));
+        Check(Level(smallestAdvice) == "Recommended" && Average(smallestAdvice) > 0 &&
+              Message(smallestAdvice).Contains("0.1% 미만"), "smallest representable remainder preserved");
+        object tiny = Evaluate(Snapshot(Start, Bucket("a", Window(0.01, 10080, Start.AddHours(1)))));
+        Check(Message(tiny).Contains("0.1% 미만") && Message(tiny).Contains("소진") == false, "tiny reset remainder not zero");
+        DateTimeOffset midnight = DateTimeOffset.Parse("2026-11-10T00:00:00+09:00");
         object before = Snapshot(midnight.AddMinutes(-1), Bucket("a", Week()));
-        Check(Baseline(Evaluate(before, midnight.AddTicks(-1))) == 58, "before midnight");
-        Check(Baseline(Evaluate(before, midnight)) == 44, "midnight advances without saved state or new fetch");
+        decimal previous = Average(Evaluate(before, midnight.AddTicks(-1)))!.Value;
+        decimal next = Average(Evaluate(before, midnight))!.Value;
+        Check(Math.Abs(previous - next) < 0.000001m, "midnight continuous without new fetch");
+        Check(Average(Evaluate(Sample(), Start.ToOffset(TimeSpan.FromHours(-5)))) == Average(Evaluate(Sample())),
+              "same instant different timezone same average");
         Hold(Evaluate(Snapshot(Reset, Bucket("a", Week())), Reset), "weekly reset waits for new interval");
         object newWeek = Snapshot(Reset, Bucket("a", Window(100, 10080, Reset.AddDays(7))));
-        Check(Baseline(Evaluate(newWeek, Reset)) != null, "new weekly reset accepted");
-        Check(Baseline(Evaluate(Sample(), zone: TimeZoneInfo.Utc)) == 53, "timezone changes pure result");
-        TimeZoneInfo eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+        Check(Average(Evaluate(newWeek, Reset)) != null, "new weekly reset accepted");
         foreach ((string begin, string end, int hours) in new[] {
             ("2026-03-08T00:00:00-05:00", "2026-03-09T00:00:00-04:00", 23),
             ("2026-11-01T00:00:00-04:00", "2026-11-02T00:00:00-05:00", 25) })
         {
             DateTimeOffset now = DateTimeOffset.Parse(begin);
-            DateTimeOffset next = DateTimeOffset.Parse(end);
-            object advice = Evaluate(Snapshot(now, Bucket("a", Window(100, 10080, now.AddDays(7)))), now, zone: eastern);
-            Check((next - now).TotalHours == hours, "DST fixture duration");
-            Check(Baseline(advice) == (hours == 23 ? 87 : 86), "DST real elapsed baseline");
-        }
-        foreach (bool gap in new[] { true, false })
-        {
-            var start = TimeZoneInfo.TransitionTime.CreateFixedDateRule(new DateTime(1, 1, 1, 0, 0, 0), 3, 1);
-            var end = TimeZoneInfo.TransitionTime.CreateFixedDateRule(new DateTime(1, 1, 1, 1, 0, 0), 11, 1);
-            var rule = TimeZoneInfo.AdjustmentRule.CreateAdjustmentRule(new DateTime(2026, 1, 1),
-                new DateTime(2026, 12, 31), TimeSpan.FromHours(1), start, end);
-            var zone = TimeZoneInfo.CreateCustomTimeZone("fixture", TimeSpan.Zero, "fixture", "standard", "daylight", [rule]);
-            DateTimeOffset now = DateTimeOffset.Parse(gap ? "2026-02-28T12:00:00Z" : "2026-10-31T12:00:00Z");
-            DateTimeOffset actual = (DateTimeOffset)Static("Services.UsagePacingAdvisor", "NextMidnight", now, zone);
-            DateTimeOffset expected = DateTimeOffset.Parse(gap ? "2026-03-01T00:00:00Z" : "2026-10-31T23:00:00Z");
-            Check(actual == expected, "midnight gap/overlap first real instant");
+            DateTimeOffset reset = DateTimeOffset.Parse(end);
+            object advice = Evaluate(Snapshot(now, Bucket("a", Window(50, 10080, reset))), now);
+            Check((reset - now).TotalHours == hours, "DST fixture actual duration");
+            Check(Math.Abs(Average(advice)!.Value - 50m * 24 / hours) < 0.000001m, "DST uses elapsed hours");
+            Check(Level(advice) == (hours == 23 ? "UntilReset" : "Recommended"), "DST 24h boundary real duration");
         }
     }
 
@@ -263,7 +275,7 @@ internal static class PacingProbe
                 buckets.SetValue(bucket, 0);
                 object snapshot = Activator.CreateInstance(fresh.GetType("UsageViewer.Models.UsageSnapshot", true)!, "synthetic", buckets, Start)!;
                 object advice = fresh.GetType("UsageViewer.Services.UsagePacingAdvisor", true)!.GetMethod("Evaluate")!
-                    .Invoke(null, [snapshot, null, false, Start, Korea])!;
+                    .Invoke(null, [snapshot, null, false, Start])!;
                 string result = (string)fresh.GetType("UsageViewer.UI.UsageDisplayHelper", true)!.GetMethod("FormatPacingDetails")!
                     .Invoke(null, [advice])!;
                 Check(result == expected, "fresh assembly restart same pure calculation");
@@ -290,15 +302,15 @@ internal static class PacingProbe
             JsonElement provider = payload.RootElement.GetProperty("providers")[0];
             JsonElement pacing = provider.GetProperty("pacing");
             JsonElement window = provider.GetProperty("windows")[0];
-            Check(window.GetProperty("remaining").GetDouble() == 76 && window.GetProperty("baseline").GetInt32() == 58,
-                  "popup real DLL remaining/baseline payload");
+            Check(window.GetProperty("remaining").GetDouble() == 76 && Math.Abs(window.GetProperty("average24Hours").GetDecimal() - 17.714m) < 0.001m,
+                  "popup real DLL remaining/average payload");
             Check(pacing.GetProperty("message").GetString() == Message(advice) && pacing.GetProperty("detail").GetString() == Details(advice),
                   "popup shared values");
             Invoke(bar, "SetUsageTip", "codex", "Codex", snapshot, advice);
             var tips = (IDictionary)bar.GetType().GetField("_usageTips", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(bar)!;
             string tip = (string)tips["codex"]!;
-            Check(tip.Contains("76% 남음") && tip.Contains("58% 남음") && tip.Contains(Message(advice)), "tooltip same values/units/status");
-            Check(tip.Contains("한 주의 한도를 고르게") && tip.Contains("%p") == false && tip.Contains("10%를") == false,
+            Check(tip.Contains("76% 남음") && tip.Contains("약18%") && tip.Contains(Message(advice)), "tooltip same values/units/status");
+            Check(tip.Contains("남은 주간 한도를 초기화까지") && tip.Contains("%p") == false && tip.Contains("10%를") == false,
                   "new basis no budget or reserve");
             foreach (double remaining in new[] { double.NaN, double.PositiveInfinity, -1, 101 })
             {
@@ -307,10 +319,23 @@ internal static class PacingProbe
                 using JsonDocument invalidPayload = JsonDocument.Parse(JsonSerializer.Serialize(Invoke(popup, "BuildDocumentState")));
                 JsonElement invalidWindow = invalidPayload.RootElement.GetProperty("providers")[0].GetProperty("windows")[0];
                 Check(invalidWindow.GetProperty("remaining").ValueKind == JsonValueKind.Null && invalidWindow.GetProperty("invalid").GetBoolean() &&
-                      invalidWindow.GetProperty("baseline").ValueKind == JsonValueKind.Null, "invalid values serialize unknown");
+                      invalidWindow.GetProperty("average24Hours").ValueKind == JsonValueKind.Null, "invalid values serialize unknown");
                 DateTimeOffset realNow = DateTimeOffset.UtcNow;
                 object freshInvalid = Snapshot(realNow, Bucket("a", Window(remaining, 10080, realNow.AddDays(2))));
                 Check((string)Get(Invoke(bar, "CreateMetric", "Codex", freshInvalid, null, false), "Value")! == "확인 필요", "invalid top metric unknown");
+            }
+            foreach ((double remaining, double hours, string expected) in new[] {
+                (76d, 24d, "초기화까지 남은 76%를 나눠 쓰세요"),
+                (0d, 48d, "주간 한도 소진"), (0.01, 48d, "추천 페이스: 24시간에 약0.1% 미만") })
+            {
+                object fixture = Snapshot(Start, Bucket("a", Window(remaining, 10080, Start.AddHours(hours))));
+                object fixtureAdvice = Evaluate(fixture);
+                Invoke(popup, "SetState", fixture, false, null, null, null, false, fixtureAdvice, unavailable);
+                using JsonDocument fixturePayload = JsonDocument.Parse(JsonSerializer.Serialize(Invoke(popup, "BuildDocumentState")));
+                string row = fixturePayload.RootElement.GetProperty("providers")[0].GetProperty("windows")[0]
+                    .GetProperty("pacingMessage").GetString()!;
+                Invoke(bar, "SetUsageTip", "codex", "Codex", fixture, fixtureAdvice);
+                Check(row.Contains(expected) && ((string)tips["codex"]!).Contains(row), "popup and tooltip same reset/exhausted/tiny advice");
             }
             object claude = Snapshot(Start, Bucket("claude", Window(100, 300),
                 Window(94, 10080, DateTimeOffset.Parse("2026-11-15T12:00:00+09:00"))));
@@ -318,10 +343,10 @@ internal static class PacingProbe
             using JsonDocument both = JsonDocument.Parse(JsonSerializer.Serialize(Invoke(popup, "BuildDocumentState")));
             _document = both.RootElement.GetRawText();
             JsonElement[] windows = both.RootElement.GetProperty("providers")[1].GetProperty("windows").EnumerateArray().ToArray();
-            Check(windows[0].GetProperty("remaining").GetDouble() == 100 && windows[0].GetProperty("baseline").ValueKind == JsonValueKind.Null,
-                  "short limit retains own remaining, no baseline");
-            Check(windows[1].GetProperty("remaining").GetDouble() == 94 && windows[1].GetProperty("baseline").GetInt32() == 79,
-                  "Claude comparison actual popup payload");
+            Check(windows[0].GetProperty("remaining").GetDouble() == 100 && windows[0].GetProperty("average24Hours").ValueKind == JsonValueKind.Null,
+                  "short limit retains own remaining, no average");
+            Check(windows[1].GetProperty("remaining").GetDouble() == 94 && Math.Abs(windows[1].GetProperty("average24Hours").GetDecimal() - 16.372m) < 0.001m,
+                  "Claude average actual popup payload");
             Invoke(bar, "LayoutDock");
             object size = Get(bar, "ClientSize")!;
             int dpi = (int)Get(bar, "DeviceDpi")!;
@@ -336,10 +361,10 @@ internal static class PacingProbe
         using StreamReader reader = new StreamReader(stream);
         string html = reader.ReadToEnd();
         Check(html.Contains("usage(p,false)") && html.Contains("usage(p,true)"), "both HTML views share limit renderer");
-        Check(html.Contains("uv-baseline-track") && html.Contains("percent(w.baseline)") &&
-              html.Contains("percent(w.remaining)") && html.Contains("오늘의 기준선"), "two remaining rows with gray baseline meter");
-        Check(html.Contains("<details class=\"uv-help\"") && html.Contains("helpOpen=new Set()") && html.Contains("<summary>기준선은 뭔가요?</summary>"), "help initially collapsed and keyboard accessible");
-        Check(html.Contains("esc(w.name)") && html.Contains("esc(w.pacingReason") && html.Contains("esc(a.basis)"), "external text escaped");
+        Check(html.Contains("uv-baseline-track") == false && html.Contains("percent(w.remaining)") &&
+              html.Contains("esc(w.pacingMessage"), "single average row and real remaining meter");
+        Check(html.Contains("<details class=\"uv-help\"") && html.Contains("helpOpen=new Set()") && html.Contains("<summary>추천 페이스는 뭔가요?</summary>"), "help initially collapsed and keyboard accessible");
+        Check(html.Contains("esc(w.name)") && html.Contains("esc(w.pacingMessage") && html.Contains("esc(a.basis)"), "external text escaped");
         Check(html.Contains("data-action=\"hide\"") && html.Contains("e.key==='Escape'") && html.Contains("id=\"show-both\"") && html.Contains("크레딧"), "existing controls retained");
     }
 
@@ -384,14 +409,14 @@ internal static class PacingProbe
                 {
                     host.ClientSize = new Size(width, 900);
                     await browser.ExecuteScriptAsync($"fixture.showBoth={both.ToString().ToLowerInvariant()};fixture.docked={docked.ToString().ToLowerInvariant()};fixture.activeProvider='codex';usageViewer.update(fixture);");
-                    Check(await ScriptBool(browser, "document.body.innerText.includes('76%') && document.body.innerText.includes('58%')"), "rendered Codex comparison " + width);
-                    Check(await ScriptBool(browser, "document.querySelector('.uv-baseline-track>span').style.width==='58%'"), "rendered baseline width " + width);
+                    Check(await ScriptBool(browser, "document.body.innerText.includes('76%') && document.body.innerText.includes('추천 페이스: 24시간에 약18%')"), "rendered Codex average " + width);
+                    Check(await ScriptBool(browser, "document.querySelectorAll('.uv-baseline-track').length===0 && !document.body.innerText.includes('오늘의 기준선')"), "no obsolete baseline " + width);
                     Check(await ScriptBool(browser, "document.querySelector('.uv-limit .uv-track>span').style.width==='76%'"), "actual meter uses remaining direction " + width);
                     Check(await ScriptBool(browser, "[...document.querySelectorAll('details')].every(d=>!d.open)"), "help default collapsed " + width);
+                    Check(await ScriptBool(browser, "[...document.querySelectorAll('.uv-weekly-status')].every(e=>e.clientHeight<=parseFloat(getComputedStyle(e).lineHeight)+1)"), "concise average fits one line " + width);
                     Check(await ScriptBool(browser, "document.documentElement.scrollWidth<=innerWidth && [...document.querySelectorAll('.uv-limit,.uv-line')].every(e=>e.scrollWidth<=e.clientWidth+1)"), "no horizontal overflow " + width);
-                    Check(await ScriptBool(browser, "getComputedStyle(document.querySelector('.uv-baseline-track>span')).backgroundColor==='rgb(120, 130, 143)'"), "baseline gray " + width);
                     await browser.ExecuteScriptAsync("fixture.showBoth=false;fixture.activeProvider='claude';usageViewer.update(fixture);");
-                    Check(await ScriptBool(browser, "document.body.innerText.includes('100%') && document.body.innerText.includes('94%') && document.body.innerText.includes('79%') && document.querySelectorAll('.uv-baseline-track').length===1"), "Claude independent short/weekly rendered " + width);
+                    Check(await ScriptBool(browser, "document.body.innerText.includes('100%') && document.body.innerText.includes('94%') && document.body.innerText.includes('추천 페이스: 24시간에 약16%') && document.querySelectorAll('.uv-weekly-status').length===1"), "Claude independent short/weekly rendered " + width);
                     Check(await ScriptBool(browser, "[...document.querySelectorAll('.uv-limit,.uv-line')].every(e=>e.scrollWidth<=e.clientWidth+1)"), "Claude rows fit " + width);
                 }
                 await browser.ExecuteScriptAsync("document.querySelector('summary').click();");
@@ -400,9 +425,22 @@ internal static class PacingProbe
                 await browser.ExecuteScriptAsync("usageViewer.update(fixture);");
                 Check(await ScriptBool(browser, "document.querySelector('details').open"), "help expansion retained on refresh");
                 await browser.ExecuteScriptAsync("fixture.providers[1].windows[0].shortTermWarning='5시간 한도 소진 · 초기화를 기다려 주세요';fixture.providers[1].windows[0].remaining=0;usageViewer.update(fixture);");
-                Check(await ScriptBool(browser, "document.body.innerText.includes('5시간 한도 소진') && document.body.innerText.includes('79%')"), "rendered short exhaustion with valid weekly baseline");
+                Check(await ScriptBool(browser, "document.body.innerText.includes('5시간 한도 소진') && document.body.innerText.includes('추천 페이스: 24시간에 약16%')"), "rendered short exhaustion with valid weekly average");
                 await browser.ExecuteScriptAsync("fixture.providers[1].windows[1].name='VeryLongModelName'.repeat(10)+'<script>';usageViewer.update(fixture);");
                 Check(await ScriptBool(browser, "document.documentElement.scrollWidth<=innerWidth && document.querySelectorAll('script').length===1"), "long external model wraps and remains escaped");
+                await browser.ExecuteScriptAsync("fixture.providers[1].windows[1].remaining=0.01;fixture.providers[1].windows[1].pacingMessage='추천 페이스: 24시간에 약0.1% 미만';usageViewer.update(fixture);");
+                Check(await ScriptBool(browser, "document.body.innerText.includes('0.1% 미만 남음') && !document.querySelector('.uv-limit:last-of-type strong').innerText.startsWith('0%')"), "tiny actual remainder not rendered as zero");
+                await browser.ExecuteScriptAsync("fixture.providers[1].windows[1].pacingMessage='추천 페이스 보류 · 잔여량 확인 필요';fixture.providers[1].windows[1].pacingReason='잔여량 확인 필요';fixture.providers[1].windows[1].invalid=true;usageViewer.update(fixture);");
+                Check(await ScriptBool(browser, "document.body.innerText.includes('추천 페이스 보류 · 잔여량 확인 필요') && !document.body.innerText.includes('약0%')"), "rendered invalid advice held with reason");
+                var messages = new System.Collections.Generic.List<string>();
+                browser.CoreWebView2.WebMessageReceived += (_, args) => messages.Add(args.WebMessageAsJson);
+                await browser.ExecuteScriptAsync("document.querySelector('[data-action=refresh]').click();document.querySelector('[data-action=hide]').click();document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}));document.getElementById('show-both').click();document.getElementById('show-both').click();document.querySelector('[data-provider=codex]').click();");
+                // Let posted WebView messages reach the native handler without interacting with the user app.
+                await Task.Delay(100);
+                string[] types = messages.Select(message => JsonDocument.Parse(message).RootElement.GetProperty("type").GetString()!).ToArray();
+                Check(types.Contains("refresh") && types.Count(type => type == "hide") == 2 &&
+                      types.Count(type => type == "mode") == 2 && types.Contains("provider"), "refresh/close/Escape/view/tab native message connections");
+                Check(await ScriptBool(browser, "document.querySelector('[data-provider=codex]').getAttribute('aria-pressed')==='true' && !document.getElementById('show-both').checked"), "tab and view controls update rendered state");
                 Console.WriteLine("PASS: actual WebView2 rendering at 264/280/320 DIP; invisible isolated fixture, no user interaction.");
             }
             catch (Exception exception)

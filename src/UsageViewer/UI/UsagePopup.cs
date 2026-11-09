@@ -351,7 +351,7 @@ internal sealed class UsagePopup : Form
 
                     bool valid = double.IsFinite(window.UsedPercent) == true &&
                                  window.UsedPercent >= 0 && window.UsedPercent <= 100;
-                    UsagePacingItem? comparison = (advice.Weekly ?? []).Concat(advice.ShortTerm ?? [])
+                    UsagePacingItem? pacingItem = (advice.Weekly ?? []).Concat(advice.ShortTerm ?? [])
                         .FirstOrDefault(item => item.BucketId == bucket.Id && ReferenceEquals(item.Window, window));
                     windows.Add(new
                     {
@@ -364,12 +364,11 @@ internal sealed class UsagePopup : Form
                         expired = UsageDisplayHelper.IsExpired(window),
                         resetText = UsageDisplayHelper.FormatReset(window),
                         weekly = window.DurationMinutes == 10080,
-                        baseline = comparison?.Baseline,
-                        endsAtReset = comparison?.EndsAtReset == true,
-                        pacingReason = comparison?.Reason,
-                        pacingMessage = comparison?.Baseline != null ?
-                                        UsageDisplayHelper.GetWeeklyMessage(comparison.Level) : null,
-                        shortTermWarning = comparison != null ? UsageDisplayHelper.FormatShortTermWarning(comparison) : ""
+                        average24Hours = pacingItem?.Average24Hours,
+                        pacingReason = pacingItem?.Reason,
+                        pacingMessage = window.DurationMinutes == 10080 && pacingItem != null ?
+                                        UsageDisplayHelper.GetWeeklyMessage(pacingItem) : null,
+                        shortTermWarning = pacingItem != null ? UsageDisplayHelper.FormatShortTermWarning(pacingItem) : ""
                     });
                 }
             }

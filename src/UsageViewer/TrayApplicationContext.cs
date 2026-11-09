@@ -335,10 +335,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         DateTimeOffset now = DateTimeOffset.UtcNow;
-        TimeZoneInfo.ClearCachedData();
-        TimeZoneInfo zone = TimeZoneInfo.Local;
-        UsagePacingAdvice codex = UsagePacingAdvisor.Evaluate(_snapshot, _error, false, now, zone);
-        UsagePacingAdvice claude = UsagePacingAdvisor.Evaluate(_claudeSnapshot, _claudeError, _claudeStale, now, zone);
+        UsagePacingAdvice codex = UsagePacingAdvisor.Evaluate(_snapshot, _error, false, now);
+        UsagePacingAdvice claude = UsagePacingAdvisor.Evaluate(_claudeSnapshot, _claudeError, _claudeStale, now);
         _popup.SetState(_snapshot, _refreshing, _error, _claudeSnapshot, _claudeError, _claudeStale, codex, claude);
         _topBar.SetUsage(_installed, _snapshot, _error, _claudeSnapshot, _claudeError, _claudeStale, codex, claude);
         UpdateUsageAlerts();

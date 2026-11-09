@@ -9,7 +9,7 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
 .uv-window.uv-docked{border-top:0;border-radius:0 0 12px 12px;padding-top:12px}
 .uv-limits{font-size:10px;color:#a8b5c6;margin:0 0 7px;overflow-wrap:anywhere}
 .uv-track.uv-low>span{background:#f88b98}.uv-track.uv-critical>span{background:#ff697e}.uv-alert-note{margin:7px 0;padding:6px 8px;border-radius:5px;background:#3d202a;color:#ffbdc5;font-size:11px;overflow-wrap:anywhere}.uv-alert-note.uv-critical{background:#5c2430;color:#ffd8dd}
-.uv-baseline{margin-top:9px;font-size:11px;color:#a8b5c6}.uv-baseline-track>span{background:#78828f}.uv-weekly-status{margin-top:6px;font-size:11px;overflow-wrap:anywhere}.uv-help{margin-top:10px;color:#a8b5c6;font-size:11px;overflow-wrap:anywhere}.uv-help summary{cursor:pointer;min-height:26px;line-height:26px}.uv-help summary:focus-visible{outline:2px solid #73dec1}.uv-help p{margin:3px 0 0}.uv-limit{margin-top:12px;overflow-wrap:anywhere}.uv-limit:first-child{margin-top:0}.uv-caution{color:#efc77f}
+.uv-weekly-status{margin-top:6px;font-size:11px;overflow-wrap:anywhere}.uv-help{margin-top:10px;color:#a8b5c6;font-size:11px;overflow-wrap:anywhere}.uv-help summary{cursor:pointer;min-height:26px;line-height:26px}.uv-help summary:focus-visible{outline:2px solid #73dec1}.uv-help p{margin:3px 0 0}.uv-limit{margin-top:12px;overflow-wrap:anywhere}.uv-limit:first-child{margin-top:0}
 </style></head>
 <body><main id="app" class="uv-window" aria-label="AI 사용량"><header><strong>Usage</strong></header><div class="uv-empty">설치된 AI 확인 중…</div></main>
 <script>
@@ -18,7 +18,7 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
  const helpOpen=new Set();
  let state={showBoth:true,activeProvider:'codex',providers:[],refreshing:false};
  const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
- const percent=n=>Number.isFinite(n)&&n>=0&&n<=100?Number(n).toLocaleString('en-US',{maximumFractionDigits:1})+'%':'—';
+ const percent=n=>Number.isFinite(n)&&n>=0&&n<=100?(n>0&&n<0.1?'0.1% 미만':Number(n).toLocaleString('en-US',{maximumFractionDigits:1})+'%'):'—';
  function send(message){if(window.chrome?.webview)window.chrome.webview.postMessage(message)}
  function resize(){requestAnimationFrame(()=>send({type:'resize',height:Math.ceil(app.getBoundingClientRect().height)}))}
  const refreshIcon='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7a9 9 0 1 0 1 5M20 3v5h-5"/></svg>';
@@ -28,13 +28,12 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
  function brand(p){return '<div class="uv-brand"><span class="uv-mark uv-'+esc(p.id)+'">'+(p.id==='codex'?'C':p.id==='claude'?'✳':'·')+'</span><strong>'+esc(p.name)+'</strong><span class="uv-muted">'+esc(p.plan||'감지됨')+'</span></div>'}
  function meter(p,w){if(w.invalid||w.expired)return '<div class="uv-small uv-muted">'+(w.invalid?'잔여량 확인 필요':'새 수신 필요')+'</div>';return '<div class="uv-track '+(p.id==='claude'?'uv-cl-track ':'')+(w.alert==='critical'?'uv-critical':w.alert==='warning'?'uv-low':'')+'"><span style="width:'+(w.expired||w.invalid?0:Math.max(0,Math.min(100,w.remaining)))+'%"></span></div>'}
  function alertNotice(p){const low=p.windows.filter(w=>w.alert==='critical'||w.alert==='warning').sort((a,b)=>a.remaining-b.remaining);if(!low.length)return '';const w=low[0],critical=w.alert==='critical';return '<div class="uv-alert-note '+(critical?'uv-critical':'')+'">! '+(critical?'레드 얼럿':'사용량 주의')+' · '+esc(w.shortName)+' '+percent(w.remaining)+' 남음</div>'}
- function pacing(p){if(!p.pacing)return '';const a=p.pacing;return (a.level==='unavailable'&&!p.windows.some(w=>w.weekly)?'<div class="uv-warning">'+esc(a.reason||a.message)+'</div>':'')+'<details class="uv-help" data-help="'+esc(p.id)+'" '+(helpOpen.has(p.id)?'open':'')+'><summary>기준선은 뭔가요?</summary><p>'+esc(a.basis)+'</p></details>'}
+ function pacing(p){if(!p.pacing)return '';const a=p.pacing;return (a.level==='unavailable'&&!p.windows.some(w=>w.weekly)?'<div class="uv-warning">'+esc(a.reason||a.message)+'</div>':'')+'<details class="uv-help" data-help="'+esc(p.id)+'" '+(helpOpen.has(p.id)?'open':'')+'><summary>추천 페이스는 뭔가요?</summary><p>'+esc(a.basis)+'</p></details>'}
  function limit(p,w,large){
   const value=w.expired||w.invalid?'갱신 필요':percent(w.remaining)+' <small>남음</small>';
   let html='<div class="uv-limit"><div class="uv-line"><span class="uv-muted">'+esc(w.name)+'</span><strong class="'+(large||w.weekly?'uv-main-value':'')+'">'+value+'</strong></div>'+meter(p,w);
   if(w.weekly){
-   if(Number.isInteger(w.baseline))html+='<div class="uv-line uv-baseline"><span>오늘의 기준선</span><span>'+percent(w.baseline)+' 남음</span></div><div class="uv-track uv-baseline-track"><span style="width:'+w.baseline+'%"></span></div><div class="uv-weekly-status">'+esc(w.pacingMessage)+(w.endsAtReset?' · 초기화 전 기준':'')+'</div>';
-   else html+='<div class="uv-warning">기준선 확인 필요 · '+esc(w.pacingReason||'최신 주간 정보 필요')+'</div>';
+   html+='<div class="'+(w.pacingReason?'uv-warning':'uv-weekly-status')+'">'+esc(w.pacingMessage||'추천 페이스 보류 · 최신 주간 정보 필요')+'</div>';
   }
   if(w.shortTermWarning)html+='<div class="uv-warning">'+esc(w.shortTermWarning)+'</div>';
   if(!w.weekly&&w.pacingReason)html+='<div class="uv-warning">'+esc(w.pacingReason)+'</div>';

@@ -4,8 +4,7 @@ namespace UsageViewer.Services;
 
 internal static class UsagePacingAdvisor
 {
-    public static UsagePacingAdvice Evaluate(UsageSnapshot? snapshot, string? error, bool stale, DateTimeOffset now,
-                                             TimeZoneInfo zone)
+    public static UsagePacingAdvice Evaluate(UsageSnapshot? snapshot, string? error, bool stale, DateTimeOffset now)
     {
         string? reason = snapshot == null ? "사용량 미수신" :
                          error != null ? "조회 실패 · 새로고침 필요" :
@@ -14,7 +13,6 @@ internal static class UsagePacingAdvisor
                          now - snapshot.RetrievedAt > TimeSpan.FromMinutes(15) ? "오래된 수신 값 · 새로고침 필요" : null;
         List<UsagePacingItem> weekly = new List<UsagePacingItem>();
         List<UsagePacingItem> shortTerm = new List<UsagePacingItem>();
-        DateTimeOffset midnight = NextMidnight(now, zone);
         foreach (UsageBucket bucket in snapshot?.Buckets ?? [])
         {
             UsageWindow[] windows = new[] { bucket.Primary, bucket.Secondary }.OfType<UsageWindow>().ToArray();
@@ -30,23 +28,26 @@ internal static class UsagePacingAdvisor
                     invalid = "주간 구간 식별 확인 필요";
                 }
 
-                int? baseline = null;
-                bool endsAtReset = false;
+                decimal? average = null;
                 UsagePacingLevel level = UsagePacingLevel.Unavailable;
                 if (invalid == null && isWeekly == true)
                 {
                     DateTimeOffset reset = window.ResetsAt!.Value;
-                    endsAtReset = reset <= midnight;
-                    DateTimeOffset end = endsAtReset == true ? reset : midnight;
-                    decimal ticks = (reset - end).Ticks;
-                    baseline = (int)decimal.Ceiling(Math.Clamp(ticks / TimeSpan.FromMinutes(10080).Ticks * 100, 0, 100));
-                    double remaining = Math.Round(window.RemainingPercent, 1, MidpointRounding.AwayFromZero);
-                    level = remaining > baseline ? UsagePacingLevel.Comfortable :
-                            remaining == baseline ? UsagePacingLevel.Balanced : UsagePacingLevel.Caution;
+                    TimeSpan remainingTime = reset - now;
+                    // Subtract in decimal so a received 99.7 does not move the 0.15 rounding boundary.
+                    decimal remaining = 100m - (decimal)window.UsedPercent;
+                    if (remaining == 0 && window.RemainingPercent > 0)
+                    {
+                        remaining = (decimal)window.RemainingPercent;
+                    }
+                    average = remaining * TimeSpan.TicksPerDay / remainingTime.Ticks;
+                    level = remaining == 0 ? UsagePacingLevel.Exhausted :
+                            remainingTime <= TimeSpan.FromHours(24) ? UsagePacingLevel.UntilReset :
+                            UsagePacingLevel.Recommended;
                 }
 
                 UsagePacingItem item = new UsagePacingItem(bucket.Id,
-                    snapshot!.Buckets.Count > 1 ? bucket.Name : null, window, level, baseline, endsAtReset, invalid);
+                    snapshot!.Buckets.Count > 1 ? bucket.Name : null, window, level, average, invalid);
                 (isWeekly == true ? weekly : shortTerm).Add(item);
             }
         }
@@ -86,18 +87,5 @@ internal static class UsagePacingAdvisor
             return "초기화 시각이 구간 길이를 초과해요";
         }
         return null;
-    }
-
-    private static DateTimeOffset NextMidnight(DateTimeOffset now, TimeZoneInfo zone)
-    {
-        DateTime midnight = DateTime.SpecifyKind(TimeZoneInfo.ConvertTime(now, zone).Date.AddDays(1),
-                                                DateTimeKind.Unspecified);
-        while (zone.IsInvalidTime(midnight) == true)
-        {
-            midnight = midnight.AddMinutes(1);
-        }
-        TimeSpan offset = zone.IsAmbiguousTime(midnight) == true ? zone.GetAmbiguousTimeOffsets(midnight).Max() :
-                          zone.GetUtcOffset(midnight);
-        return new DateTimeOffset(midnight, offset);
     }
 }
