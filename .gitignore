@@ -24,3 +24,5 @@ credentials.json
 id_rsa
 id_ed25519
 alerts.json
+hourly-allowance.json
+hourly-allowance.json.*.tmp

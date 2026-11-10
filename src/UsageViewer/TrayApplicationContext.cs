@@ -15,6 +15,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly UsagePopup _popup = new UsagePopup();
     private readonly TopUsageBar _topBar = new TopUsageBar();
     private readonly UsageAlertMonitor _alerts = new UsageAlertMonitor();
+    private readonly DailyUsageAllowanceTracker _dailyAllowances = new DailyUsageAllowanceTracker();
     private readonly UsageAlertSound _alertSound = new UsageAlertSound();
     private readonly UsageAlertToast _alertToast = new UsageAlertToast();
     private readonly NotifyIcon _tray;
@@ -337,6 +338,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
         DateTimeOffset now = DateTimeOffset.UtcNow;
         UsagePacingAdvice codex = UsagePacingAdvisor.Evaluate(_snapshot, _error, false, now);
         UsagePacingAdvice claude = UsagePacingAdvisor.Evaluate(_claudeSnapshot, _claudeError, _claudeStale, now);
+        TimeZoneInfo zone = TimeZoneInfo.Local;
+        codex = _dailyAllowances.Apply("codex", _snapshot, codex, now, zone);
+        claude = _dailyAllowances.Apply("claude", _claudeSnapshot, claude, now, zone);
+        _ = _dailyAllowances.SaveAsync();
         _popup.SetState(_snapshot, _refreshing, _error, _claudeSnapshot, _claudeError, _claudeStale, codex, claude);
         _topBar.SetUsage(_installed, _snapshot, _error, _claudeSnapshot, _claudeError, _claudeStale);
         UpdateUsageAlerts();
@@ -497,6 +502,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             await _codexConnection.ActiveConnection;
         }
 
+        await _dailyAllowances.SaveAsync();
         _tray.Visible = false;
         _popup.CloseForExit();
         ExitThread();

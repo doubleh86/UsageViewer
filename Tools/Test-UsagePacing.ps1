@@ -33,7 +33,9 @@ internal static class PacingProbe
     private static string _root = "";
     private static int _passed;
     private static string _document = "";
+    private static string _dailyDocument = "";
     private static readonly DateTimeOffset Start = DateTimeOffset.Parse("2026-11-09T18:12:00+09:00");
+    private static readonly DateTimeOffset DailyStart = DateTimeOffset.Parse("2026-11-09T00:00:00+09:00");
     private static readonly DateTimeOffset Reset = DateTimeOffset.Parse("2026-11-14T01:10:00+09:00");
 
     [STAThread]
@@ -52,6 +54,8 @@ internal static class PacingProbe
             CheckInvalid();
             CheckTime();
             CheckStateless();
+            CheckDailyAllowance();
+            CheckDailyFormula();
             CheckPresentation();
             CheckRendering();
             Console.WriteLine($"PASS: {_passed} synthetic usage-pacing checks; no accounts or user settings accessed.");
@@ -119,17 +123,22 @@ internal static class PacingProbe
         object codex = Evaluate(Sample());
         Check(Math.Abs(Average(codex)!.Value - 17.714m) < 0.001m, "approved average 76 / 102h58m");
         Check(Details(codex).Contains("76% 남음"), "remaining units");
-        Check(Message(codex) == "추천 페이스: 24시간에 약18%", "concise weekly average");
+        Check(Message(codex) == "추천 페이스: 24시간에 약17.71%", "concise weekly average");
         Check(Math.Abs(Average(Evaluate(Sample(60)))!.Value / Average(codex)!.Value - 60m / 76m) < 0.00001m,
               "remaining changes proportional average");
         Check(Average(Evaluate(Sample(), Start.AddMinutes(5))) > Average(codex), "time changes recalculate");
+        foreach ((double remaining, string text) in new[] { (68d, "19.43%"), (67d, "19.14%") })
+        {
+            object advice = Evaluate(Snapshot(Start, Bucket("a", Window(remaining, 10080, Start.AddHours(84)))));
+            Check(Message(advice) == "추천 페이스: 24시간에 약" + text, "visible change for user example " + remaining);
+        }
         foreach (bool reverse in new[] { false, true })
         {
             object week = Window(94, 10080, DateTimeOffset.Parse("2026-11-15T12:00:00+09:00"));
             object shortTerm = Window(100, 300);
             object snapshot = Snapshot(Start, Bucket("claude", reverse ? week : shortTerm, reverse ? shortTerm : week));
             object advice = Evaluate(snapshot);
-            Check(Level(advice) == "Recommended" && Message(advice) == "추천 페이스: 24시간에 약16%",
+            Check(Level(advice) == "Recommended" && Message(advice) == "추천 페이스: 24시간에 약16.37%",
                   "weekly valid without short reset / order");
             Check(Details(advice).Contains("100% 남음") && Details(advice).Contains("94% 남음") &&
                   Details(advice).Contains("시각 미제공"), "separate limits");
@@ -152,7 +161,7 @@ internal static class PacingProbe
             Check(Items(multiple).Length == 2 && Items(multiple).All(item => Get(item, "Average24Hours") != null), "per-model averages");
             Check((string?)Get(Get(multiple, "Limiting")!, "BucketName") == "Model B" && Message(multiple).Contains("Model B"), "smallest average summary named / order");
             Check(Details(multiple).Contains("Model A") && Details(multiple).Contains("Model B") &&
-                  Details(multiple).Contains("약18%") && Details(multiple).Contains("약12%"), "model averages never pooled");
+                  Details(multiple).Contains("약17.71%") && Details(multiple).Contains("약12.19%"), "model averages never pooled");
         }
         object partial = Evaluate(Snapshot(Start, Bucket("a", Week()), Bucket("b", Window(80))));
         Check(Get(Items(partial)[0], "Average24Hours") != null && Get(Items(partial)[1], "Average24Hours") == null,
@@ -206,15 +215,17 @@ internal static class PacingProbe
                   "up to 24h including tiny interval");
         }
         object over = Evaluate(Snapshot(Start, Bucket("a", Window(76, 10080, Start.AddHours(24).AddTicks(1)))));
-        Check(Level(over) == "Recommended" && Message(over).Contains("약76%"), "one tick beyond 24h");
+        Check(Level(over) == "Recommended" && Message(over).Contains("약76.00%"), "one tick beyond 24h");
         foreach (int hours in new[] { 1, 24, 48, 168 })
         {
             object zero = Evaluate(Snapshot(Start, Bucket("a", Window(0, 10080, Start.AddHours(hours)))));
             Check(Level(zero) == "Exhausted" && Average(zero) == 0 && Message(zero).Contains("소진"), "actual zero exhausted");
         }
         foreach ((double remaining, string text) in new[] {
-            (0.1, "0.1% 미만"), (0.199, "0.1% 미만"), (0.2, "0.1%"), (0.3, "0.2%"),
-            (1.89, "0.9%"), (1.9, "1%"), (1.999, "1%"), (2d, "1%"), (2.998, "1%"), (3d, "2%"), (3.002, "2%") })
+            (0.01, "0.01% 미만"), (0.0199, "0.01% 미만"), (0.02, "0.01%"), (0.03, "0.02%"),
+            (0.1, "0.05%"), (0.199, "0.10%"), (0.2, "0.10%"), (0.3, "0.15%"),
+            (1.89, "0.95%"), (1.9, "0.95%"), (1.999, "1.00%"), (2d, "1.00%"),
+            (2.998, "1.50%"), (3d, "1.50%"), (3.002, "1.50%") })
         {
             object advice = Evaluate(Snapshot(Start, Bucket("a", Window(remaining, 10080, Start.AddHours(48)))));
             Check(Message(advice) == "추천 페이스: 24시간에 약" + text, "percent precision / rounding " + remaining);
@@ -223,7 +234,7 @@ internal static class PacingProbe
         object smallest = New("Models.UsageWindow", double.BitDecrement(100d), (int?)10080, (DateTimeOffset?)Reset);
         object smallestAdvice = Evaluate(Snapshot(Start, Bucket("tiny", smallest)));
         Check(Level(smallestAdvice) == "Recommended" && Average(smallestAdvice) > 0 &&
-              Message(smallestAdvice).Contains("0.1% 미만"), "smallest representable remainder preserved");
+              Message(smallestAdvice).Contains("0.01% 미만"), "smallest representable remainder preserved");
         object tiny = Evaluate(Snapshot(Start, Bucket("a", Window(0.01, 10080, Start.AddHours(1)))));
         Check(Message(tiny).Contains("0.1% 미만") && Message(tiny).Contains("소진") == false, "tiny reset remainder not zero");
         DateTimeOffset midnight = DateTimeOffset.Parse("2026-11-10T00:00:00+09:00");
@@ -287,6 +298,199 @@ internal static class PacingProbe
         }
     }
 
+    private static object DailySnapshot(DateTimeOffset at, double remaining, DateTimeOffset? reset = null) =>
+        Snapshot(at, Bucket("daily-fixture", Window(remaining, 10080, reset ?? DailyStart.AddHours(96))));
+    private static object ApplyDaily(object tracker, object snapshot, DateTimeOffset now, string provider = "codex",
+                                     TimeZoneInfo? zone = null, string? error = null, bool stale = false) =>
+        Invoke(tracker, "Apply", provider, snapshot, Evaluate(snapshot, now, error, stale), now,
+               zone ?? TimeZoneInfo.CreateCustomTimeZone("Fixture+9", TimeSpan.FromHours(9), "fixture", "fixture"));
+    private static object Daily(object advice) => Get(Items(advice).Single(), "Daily")!;
+    private static decimal DailyValue(object advice, string property) => (decimal)Get(Daily(advice), property)!;
+    private static void SaveDaily(object tracker) => ((Task)Invoke(tracker, "SaveAsync")).GetAwaiter().GetResult();
+
+    private static void CheckDailyAllowance()
+    {
+        string path = Path.Combine(_root, "allowance-fixture.json");
+        object tracker = New("Services.DailyUsageAllowanceTracker", path);
+        object first = ApplyDaily(tracker, DailySnapshot(DailyStart, 76), DailyStart);
+        Check(DailyValue(first, "TargetPercent") == 19 && DailyValue(first, "RemainingPercent") == 19,
+              "first daily target frozen at 19");
+        Check(Message(first) == "오늘 남은 권장량: 19.00%", "daily label is not a rolling average");
+        object early = ApplyDaily(tracker, DailySnapshot(DailyStart.AddMinutes(30), 74), DailyStart.AddMinutes(30));
+        Check(DailyValue(early, "RemainingPercent") == 19 && DailyValue(early, "UsedPercent") == 0,
+              "do not debit before hourly checkpoint");
+        object hour = ApplyDaily(tracker, DailySnapshot(DailyStart.AddHours(1), 74), DailyStart.AddHours(1));
+        Check(DailyValue(hour, "TargetPercent") == 19 && DailyValue(hour, "UsedPercent") == 2 &&
+              DailyValue(hour, "RemainingPercent") == 17, "19 minus observed 2 equals 17");
+        Check(Message(hour) == "오늘 남은 권장량: 17.00%", "hourly debit visible with two decimals");
+        Check((DateTimeOffset)Get(Daily(hour), "CheckedAt")! == DailyStart.AddHours(1), "internal checkpoint timestamp preserved");
+        object beforeSecond = ApplyDaily(tracker, DailySnapshot(DailyStart.AddMinutes(90), 70), DailyStart.AddMinutes(90));
+        Check(DailyValue(beforeSecond, "RemainingPercent") == 17, "same hour does not repeatedly debit");
+        object second = ApplyDaily(tracker, DailySnapshot(DailyStart.AddHours(2), 70), DailyStart.AddHours(2));
+        Check(DailyValue(second, "UsedPercent") == 6 && DailyValue(second, "RemainingPercent") == 13,
+              "second hour cumulative debit");
+        SaveDaily(tracker);
+        object restarted = New("Services.DailyUsageAllowanceTracker", path);
+        object restored = ApplyDaily(restarted, DailySnapshot(DailyStart.AddMinutes(130), 69), DailyStart.AddMinutes(130));
+        Check(DailyValue(restored, "TargetPercent") == 19 && DailyValue(restored, "RemainingPercent") == 13,
+              "restart restores baseline and checkpoint");
+        object recovery = ApplyDaily(restarted, DailySnapshot(DailyStart.AddHours(3), 72), DailyStart.AddHours(3));
+        Check(DailyValue(recovery, "RemainingPercent") == 13, "increase does not issue another daily budget");
+        object stale = ApplyDaily(restarted, DailySnapshot(DailyStart.AddHours(4), 65), DailyStart.AddHours(4), stale: true);
+        Check(Level(stale) == "Unavailable" && Get(Items(stale).Single(), "Daily") == null, "stale checkpoint held");
+        object error = ApplyDaily(restarted, DailySnapshot(DailyStart.AddHours(4), 65), DailyStart.AddHours(4), error: "failed");
+        Check(Level(error) == "Unavailable", "failed checkpoint held");
+        object recovered = ApplyDaily(restarted, DailySnapshot(DailyStart.AddHours(4), 65), DailyStart.AddHours(4));
+        Check(DailyValue(recovered, "RemainingPercent") == 8, "error did not reset daily target");
+        object independent = ApplyDaily(restarted, DailySnapshot(DailyStart.AddHours(4), 65), DailyStart.AddHours(4), "claude");
+        Check(DailyValue(independent, "UsedPercent") == 0, "providers do not share budgets");
+        object oldReceipt = DailySnapshot(DailyStart.AddHours(4).AddMinutes(-1), 64);
+        Check(Level(ApplyDaily(restarted, oldReceipt, DailyStart.AddHours(4))) == "Unavailable", "receipt regression held");
+        object over = ApplyDaily(restarted, DailySnapshot(DailyStart.AddHours(5), 50), DailyStart.AddHours(5));
+        Check(DailyValue(over, "RemainingPercent") == 0 && DailyValue(over, "UsedPercent") == 26 &&
+              Message(over).Contains("초과 사용"), "over-budget is distinct from actual quota exhaustion");
+        Check(Items(over).Single() is object && Get(Items(over).Single(), "Window") is object, "actual quota retained");
+        SaveDaily(restarted);
+        string stored = File.ReadAllText(path);
+        Check(stored.Contains("daily-fixture") == false && stored.Contains("claude") == false &&
+              stored.Contains("synthetic") == false && stored.Contains("access_token") == false, "store has hashes not identifiers or raw responses");
+        using (JsonDocument journal = JsonDocument.Parse(stored))
+        {
+            Check(journal.RootElement.EnumerateObject().All(pair => pair.Name.Length == 64), "hashed interval keys only");
+        }
+        DateTimeOffset midnight = DateTimeOffset.Parse("2026-11-10T00:00:00+09:00");
+        object oldDay = DailySnapshot(midnight.AddMinutes(-1), 50);
+        Check(Level(ApplyDaily(restarted, oldDay, midnight)) == "Unavailable", "yesterday cache does not seed today");
+        object nextDay = ApplyDaily(restarted, DailySnapshot(midnight, 50), midnight);
+        Check(DailyValue(nextDay, "UsedPercent") == 0 && DailyValue(nextDay, "TargetPercent") > 0,
+              "next day starts from actual remaining quota");
+        object lessUsedTracker = New("Services.DailyUsageAllowanceTracker", Path.Combine(_root, "less-used.json"));
+        object lessUsed = ApplyDaily(lessUsedTracker, DailySnapshot(midnight, 60), midnight);
+        Check(DailyValue(lessUsed, "TargetPercent") > DailyValue(nextDay, "TargetPercent"), "unused quota increases following day allocation");
+        object resetTracker = New("Services.DailyUsageAllowanceTracker", Path.Combine(_root, "new-reset.json"));
+        ApplyDaily(resetTracker, DailySnapshot(DailyStart, 76), DailyStart);
+        object newReset = ApplyDaily(resetTracker, DailySnapshot(DailyStart.AddHours(1), 95, DailyStart.AddDays(7)), DailyStart.AddHours(1));
+        Check(DailyValue(newReset, "UsedPercent") == 0 && DailyValue(newReset, "TargetPercent") < 95,
+              "new reset gets independent baseline");
+        object lastTracker = New("Services.DailyUsageAllowanceTracker", Path.Combine(_root, "last-day.json"));
+        object last = ApplyDaily(lastTracker, DailySnapshot(DailyStart, 10, DailyStart.AddHours(10)), DailyStart);
+        Check(DailyValue(last, "TargetPercent") == 10, "last day allocation does not exceed real remaining");
+        object lastHour = ApplyDaily(lastTracker, DailySnapshot(DailyStart.AddHours(1), 8, DailyStart.AddHours(10)), DailyStart.AddHours(1));
+        Check(DailyValue(lastHour, "RemainingPercent") == 8, "last day hourly debit");
+        object zero = ApplyDaily(lastTracker, DailySnapshot(DailyStart.AddHours(2), 0, DailyStart.AddHours(10)), DailyStart.AddHours(2));
+        Check(Message(zero).Contains("주간 한도 소진"), "real quota zero still distinct");
+        object multiTracker = New("Services.DailyUsageAllowanceTracker", Path.Combine(_root, "multiple-allowances.json"));
+        object multiFirst = Snapshot(DailyStart, Bucket("a", Window(76, 10080, DailyStart.AddHours(96))), Bucket("b", Window(40, 10080, DailyStart.AddHours(96))));
+        ApplyDaily(multiTracker, multiFirst, DailyStart);
+        object multiHour = Snapshot(DailyStart.AddHours(1), Bucket("a", Window(74, 10080, DailyStart.AddHours(96))), Bucket("b", Window(39, 10080, DailyStart.AddHours(96))));
+        object multiDaily = ApplyDaily(multiTracker, multiHour, DailyStart.AddHours(1));
+        object[] multiItems = Items(multiDaily);
+        Check((decimal)Get(Get(multiItems[0], "Daily")!, "RemainingPercent")! == 17 &&
+              (decimal)Get(Get(multiItems[1], "Daily")!, "RemainingPercent")! == 9, "model budgets independently deducted");
+        Check((string)Get(Get(multiDaily, "Limiting")!, "BucketId")! == "b", "summary selects least daily allowance");
+        object shortOnly = Snapshot(DailyStart, Bucket("short", Window(80, 300)));
+        Check(Get(ApplyDaily(multiTracker, shortOnly, DailyStart), "Limiting") == null, "five hour interval does not fabricate weekly budget");
+        object changedZone = ApplyDaily(restarted, DailySnapshot(DailyStart.AddHours(5), 50), DailyStart.AddHours(5),
+            zone: TimeZoneInfo.CreateCustomTimeZone("Fixture+8", TimeSpan.FromHours(8), "fixture", "fixture"));
+        Check(DailyValue(changedZone, "UsedPercent") == 0, "timezone has independent dated baseline");
+        string invalidPath = Path.Combine(_root, "invalid-checkpoint.json");
+        File.WriteAllText(invalidPath, stored.Replace("\"Target\":19", "\"Target\":101"));
+        object invalidTracker = New("Services.DailyUsageAllowanceTracker", invalidPath);
+        Check(Level(ApplyDaily(invalidTracker, DailySnapshot(DailyStart, 76), DailyStart)) == "Unavailable", "invalid stored target rejected");
+        string corruptPath = Path.Combine(_root, "corrupt-allowance.json");
+        File.WriteAllText(corruptPath, "broken");
+        object corrupt = New("Services.DailyUsageAllowanceTracker", corruptPath);
+        Check(Level(ApplyDaily(corrupt, DailySnapshot(DailyStart, 76), DailyStart)) == "Unavailable", "corrupt journal does not fabricate budget");
+        SaveDaily(corrupt);
+        Check(File.ReadAllText(corruptPath) == "broken", "corrupt input preserved");
+        string blockedPath = Path.Combine(_root, "blocked-target");
+        Directory.CreateDirectory(blockedPath);
+        object blocked = New("Services.DailyUsageAllowanceTracker", blockedPath);
+        ApplyDaily(blocked, DailySnapshot(DailyStart, 76), DailyStart);
+        SaveDaily(blocked);
+        Check(Level(ApplyDaily(blocked, DailySnapshot(DailyStart.AddMinutes(1), 76), DailyStart.AddMinutes(1))) == "Unavailable",
+              "write failure shown rather than promising restart persistence");
+    }
+
+    private static decimal DayTarget(decimal remaining, DateTimeOffset at, DateTimeOffset reset, TimeZoneInfo zone) =>
+        (decimal)Static("Services.DailyAllowanceHelper", "CalculateTarget", remaining, at, reset, zone);
+
+    private static void CheckDailyFormula()
+    {
+        var zone = TimeZoneInfo.CreateCustomTimeZone("Fixture+9", TimeSpan.FromHours(9), "fixture", "fixture");
+        DateTimeOffset at = DateTimeOffset.Parse("2026-11-10T14:13:00+09:00");
+        DateTimeOffset reset = DateTimeOffset.Parse("2026-11-14T01:10:00+09:00");
+        decimal today = DayTarget(66, at, reset, zone);
+        Check(Math.Abs(today - 7.784207m) < 0.000001m, "screenshot today fraction 66 over 82h57m");
+        Check(today < 66m * 24 / (decimal)(reset - at).TotalHours, "partial day never gets a full 24-hour budget");
+        decimal remaining = 66 - today;
+        decimal total = today;
+        DateTimeOffset day = DateTimeOffset.Parse("2026-11-11T00:00:00+09:00");
+        for (int i = 0; i < 3; i++)
+        {
+            decimal target = DayTarget(remaining, day, reset, zone);
+            Check(Math.Abs(target - 19.09584m) < 0.00001m, "Wednesday/Thursday/Friday allocation " + i);
+            total += target;
+            remaining -= target;
+            day = day.AddDays(1);
+        }
+        decimal final = DayTarget(remaining, day, reset, zone);
+        Check(Math.Abs(final - 0.92827m) < 0.00001m && Math.Abs(total + final - 66) < 0.000001m,
+              "partial reset day and daily partitions conserve total remaining quota");
+        object tracker = New("Services.DailyUsageAllowanceTracker", Path.Combine(_root, "screenshot-day.json"));
+        object first = ApplyDaily(tracker, DailySnapshot(at, 66, reset), at);
+        Check(Message(first) == "오늘 남은 권장량: 7.78%", "screenshot popup correction");
+        object used = ApplyDaily(tracker, DailySnapshot(at.AddHours(1), 64, reset), at.AddHours(1));
+        Check(Message(used) == "오늘 남은 권장량: 5.78%" && DailyValue(used, "TargetPercent") == today,
+              "fixed partial-day goal with hourly 2 percent debit");
+        DateTimeOffset late = DateTimeOffset.Parse("2026-11-10T23:00:00+09:00");
+        DateTimeOffset earlyReset = DateTimeOffset.Parse("2026-11-11T02:00:00+09:00");
+        Check(DayTarget(24, late, earlyReset, zone) == 8, "reset within 24 hours but tomorrow keeps tomorrow share");
+        Check(DayTarget(24, late, late.AddMinutes(30), zone) == 24, "reset today allocates all remaining quota");
+        Check(DayTarget(0, at, reset, zone) == 0, "zero quota stays zero");
+        Check(DayTarget(50, late.AddMinutes(59).AddSeconds(59), reset, zone) is > 0 and < 0.01m,
+              "last second of day preserves a tiny positive allocation");
+        var eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+        foreach ((string start, string end, int hours) in new[] {
+            ("2026-03-08T00:00:00-05:00", "2026-03-15T00:00:00-04:00", 23),
+            ("2026-11-01T00:00:00-04:00", "2026-11-08T00:00:00-05:00", 25) })
+        {
+            DateTimeOffset begin = DateTimeOffset.Parse(start);
+            DateTimeOffset finish = DateTimeOffset.Parse(end);
+            decimal target = DayTarget(70, begin, finish, eastern);
+            decimal expected = 70m * TimeSpan.FromHours(hours).Ticks / (finish - begin).Ticks;
+            Check(Math.Abs(target - expected) < 0.000001m, "DST daily allocation actual " + hours + " hours");
+        }
+        DateTimeOffset delayed = at.AddMinutes(5);
+        object delayedTracker = New("Services.DailyUsageAllowanceTracker", Path.Combine(_root, "received-time-goal.json"));
+        object delayedAdvice = ApplyDaily(delayedTracker, DailySnapshot(at, 66, reset), delayed);
+        Check(DailyValue(delayedAdvice, "TargetPercent") == today, "first target anchored to receipt instead of UI reevaluation time");
+        string migrationPath = Path.Combine(_root, "target-migration.json");
+        object migrationSeed = New("Services.DailyUsageAllowanceTracker", migrationPath);
+        ApplyDaily(migrationSeed, DailySnapshot(at, 66, reset), at);
+        SaveDaily(migrationSeed);
+        string key;
+        using (JsonDocument journal = JsonDocument.Parse(File.ReadAllText(migrationPath)))
+        {
+            key = journal.RootElement.EnumerateObject().Single().Name;
+        }
+        var oldEntries = new System.Collections.Generic.Dictionary<string, object>
+        {
+            [key] = New("Services.AllowanceCheckpoint", 66m, 19.10m, 64m, at, at.AddHours(1), at.AddHours(1), reset)
+        };
+        File.WriteAllText(migrationPath, JsonSerializer.Serialize(oldEntries));
+        object migratedTracker = New("Services.DailyUsageAllowanceTracker", migrationPath);
+        object migrated = ApplyDaily(migratedTracker, DailySnapshot(at.AddMinutes(65), 64, reset), at.AddMinutes(65));
+        Check(DailyValue(migrated, "TargetPercent") == today && DailyValue(migrated, "UsedPercent") == 2 &&
+              Message(migrated) == "오늘 남은 권장량: 5.78%", "migrate old 24-hour target without forgetting prior use");
+        Check((DateTimeOffset)Get(Daily(migrated), "StartedAt")! == at &&
+              (DateTimeOffset)Get(Daily(migrated), "CheckedAt")! == at.AddHours(1), "migration preserves both original timestamps");
+        SaveDaily(migratedTracker);
+        object reloaded = New("Services.DailyUsageAllowanceTracker", migrationPath);
+        object restored = ApplyDaily(reloaded, DailySnapshot(at.AddMinutes(70), 64, reset), at.AddMinutes(70));
+        Check(DailyValue(restored, "RemainingPercent") == today - 2, "migrated target persists across restart");
+    }
+
     private static void CheckPresentation()
     {
         object snapshot = Sample();
@@ -307,7 +511,7 @@ internal static class PacingProbe
             Check(pacing.GetProperty("message").GetString() == Message(advice) && pacing.GetProperty("detail").GetString() == Details(advice),
                   "popup shared values");
             string basis = pacing.GetProperty("basis").GetString()!;
-            Check(basis.Contains("남은 주간 한도를 초기화까지") && basis.Contains("%p") == false && basis.Contains("10%를") == false,
+            Check(basis.Contains("한 시간마다 확인한 사용량") && basis.Contains("%p") == false && basis.Contains("10%를") == false,
                   "new basis no budget or reserve");
             foreach (double remaining in new[] { double.NaN, double.PositiveInfinity, -1, 101 })
             {
@@ -323,7 +527,7 @@ internal static class PacingProbe
             }
             foreach ((double remaining, double hours, string expected) in new[] {
                 (76d, 24d, "초기화까지 남은 76%를 나눠 쓰세요"),
-                (0d, 48d, "주간 한도 소진"), (0.01, 48d, "추천 페이스: 24시간에 약0.1% 미만") })
+                (0d, 48d, "주간 한도 소진"), (0.01, 48d, "추천 페이스: 24시간에 약0.01% 미만") })
             {
                 object fixture = Snapshot(Start, Bucket("a", Window(remaining, 10080, Start.AddHours(hours))));
                 object fixtureAdvice = Evaluate(fixture);
@@ -343,6 +547,25 @@ internal static class PacingProbe
                   "short limit retains own remaining, no average");
             Check(windows[1].GetProperty("remaining").GetDouble() == 94 && Math.Abs(windows[1].GetProperty("average24Hours").GetDecimal() - 16.372m) < 0.001m,
                   "Claude average actual popup payload");
+            object dailyTracker = New("Services.DailyUsageAllowanceTracker", Path.Combine(_root, "daily-render.json"));
+            ApplyDaily(dailyTracker, DailySnapshot(DailyStart, 76), DailyStart);
+            object dailySnapshot = DailySnapshot(DailyStart.AddHours(1), 74);
+            object dailyAdvice = ApplyDaily(dailyTracker, dailySnapshot, DailyStart.AddHours(1));
+            object firstClaude = Snapshot(DailyStart, Bucket("claude", Window(100, 300),
+                Window(94, 10080, DateTimeOffset.Parse("2026-11-15T12:00:00+09:00"))));
+            ApplyDaily(dailyTracker, firstClaude, DailyStart, "claude");
+            object dailyClaude = Snapshot(DailyStart.AddHours(1), Bucket("claude", Window(100, 300),
+                Window(92, 10080, DateTimeOffset.Parse("2026-11-15T12:00:00+09:00"))));
+            object claudeDailyAdvice = ApplyDaily(dailyTracker, dailyClaude, DailyStart.AddHours(1), "claude");
+            Invoke(popup, "SetState", dailySnapshot, false, null, dailyClaude, null, false, dailyAdvice, claudeDailyAdvice);
+            _dailyDocument = JsonSerializer.Serialize(Invoke(popup, "BuildDocumentState"));
+            using (JsonDocument dailyPayload = JsonDocument.Parse(_dailyDocument))
+            {
+                JsonElement row = dailyPayload.RootElement.GetProperty("providers")[0].GetProperty("windows")[0];
+                Check(row.GetProperty("pacingMessage").GetString() == "오늘 남은 권장량: 17.00%" &&
+                      row.TryGetProperty("dailyDetails", out _) == false, "actual daily popup payload uses shared checkpoint");
+                Check(row.GetProperty("remaining").GetDouble() == 74, "real quota stays separate from daily allowance");
+            }
             Invoke(bar, "LayoutDock");
             object size = Get(bar, "ClientSize")!;
             int dpi = (int)Get(bar, "DeviceDpi")!;
@@ -359,7 +582,7 @@ internal static class PacingProbe
         Check(html.Contains("usage(p,false)") && html.Contains("usage(p,true)"), "both HTML views share limit renderer");
         Check(html.Contains("uv-baseline-track") == false && html.Contains("percent(w.remaining)") &&
               html.Contains("esc(w.pacingMessage"), "single average row and real remaining meter");
-        Check(html.Contains("<details class=\"uv-help\"") && html.Contains("helpOpen=new Set()") && html.Contains("<summary>추천 페이스는 뭔가요?</summary>"), "help initially collapsed and keyboard accessible");
+        Check(html.Contains("<details class=\"uv-help\"") && html.Contains("helpOpen=new Set()") && html.Contains("<summary>오늘 권장량은 뭔가요?</summary>"), "help initially collapsed and keyboard accessible");
         Check(html.Contains("esc(w.name)") && html.Contains("esc(w.pacingMessage") && html.Contains("esc(a.basis)"), "external text escaped");
         Check(html.Contains("data-action=\"hide\"") && html.Contains("e.key==='Escape'") && html.Contains("id=\"show-both\"") && html.Contains("크레딧"), "existing controls retained");
     }
@@ -405,14 +628,14 @@ internal static class PacingProbe
                 {
                     host.ClientSize = new Size(width, 900);
                     await browser.ExecuteScriptAsync($"fixture.showBoth={both.ToString().ToLowerInvariant()};fixture.docked={docked.ToString().ToLowerInvariant()};fixture.activeProvider='codex';usageViewer.update(fixture);");
-                    Check(await ScriptBool(browser, "document.body.innerText.includes('76%') && document.body.innerText.includes('추천 페이스: 24시간에 약18%')"), "rendered Codex average " + width);
+                    Check(await ScriptBool(browser, "document.body.innerText.includes('76%') && document.body.innerText.includes('추천 페이스: 24시간에 약17.71%')"), "rendered Codex average " + width);
                     Check(await ScriptBool(browser, "document.querySelectorAll('.uv-baseline-track').length===0 && !document.body.innerText.includes('오늘의 기준선')"), "no obsolete baseline " + width);
                     Check(await ScriptBool(browser, "document.querySelector('.uv-limit .uv-track>span').style.width==='76%'"), "actual meter uses remaining direction " + width);
                     Check(await ScriptBool(browser, "[...document.querySelectorAll('details')].every(d=>!d.open)"), "help default collapsed " + width);
                     Check(await ScriptBool(browser, "[...document.querySelectorAll('.uv-weekly-status')].every(e=>e.clientHeight<=parseFloat(getComputedStyle(e).lineHeight)+1)"), "concise average fits one line " + width);
                     Check(await ScriptBool(browser, "document.documentElement.scrollWidth<=innerWidth && [...document.querySelectorAll('.uv-limit,.uv-line')].every(e=>e.scrollWidth<=e.clientWidth+1)"), "no horizontal overflow " + width);
                     await browser.ExecuteScriptAsync("fixture.showBoth=false;fixture.activeProvider='claude';usageViewer.update(fixture);");
-                    Check(await ScriptBool(browser, "document.body.innerText.includes('100%') && document.body.innerText.includes('94%') && document.body.innerText.includes('추천 페이스: 24시간에 약16%') && document.querySelectorAll('.uv-weekly-status').length===1"), "Claude independent short/weekly rendered " + width);
+                    Check(await ScriptBool(browser, "document.body.innerText.includes('100%') && document.body.innerText.includes('94%') && document.body.innerText.includes('추천 페이스: 24시간에 약16.37%') && document.querySelectorAll('.uv-weekly-status').length===1"), "Claude independent short/weekly rendered " + width);
                     Check(await ScriptBool(browser, "[...document.querySelectorAll('.uv-limit,.uv-line')].every(e=>e.scrollWidth<=e.clientWidth+1)"), "Claude rows fit " + width);
                 }
                 await browser.ExecuteScriptAsync("document.querySelector('summary').click();");
@@ -421,13 +644,23 @@ internal static class PacingProbe
                 await browser.ExecuteScriptAsync("usageViewer.update(fixture);");
                 Check(await ScriptBool(browser, "document.querySelector('details').open"), "help expansion retained on refresh");
                 await browser.ExecuteScriptAsync("fixture.providers[1].windows[0].shortTermWarning='5시간 한도 소진 · 초기화를 기다려 주세요';fixture.providers[1].windows[0].remaining=0;usageViewer.update(fixture);");
-                Check(await ScriptBool(browser, "document.body.innerText.includes('5시간 한도 소진') && document.body.innerText.includes('추천 페이스: 24시간에 약16%')"), "rendered short exhaustion with valid weekly average");
+                Check(await ScriptBool(browser, "document.body.innerText.includes('5시간 한도 소진') && document.body.innerText.includes('추천 페이스: 24시간에 약16.37%')"), "rendered short exhaustion with valid weekly average");
                 await browser.ExecuteScriptAsync("fixture.providers[1].windows[1].name='VeryLongModelName'.repeat(10)+'<script>';usageViewer.update(fixture);");
                 Check(await ScriptBool(browser, "document.documentElement.scrollWidth<=innerWidth && document.querySelectorAll('script').length===1"), "long external model wraps and remains escaped");
-                await browser.ExecuteScriptAsync("fixture.providers[1].windows[1].remaining=0.01;fixture.providers[1].windows[1].pacingMessage='추천 페이스: 24시간에 약0.1% 미만';usageViewer.update(fixture);");
+                await browser.ExecuteScriptAsync("fixture.providers[1].windows[1].remaining=0.01;fixture.providers[1].windows[1].pacingMessage='추천 페이스: 24시간에 약0.01% 미만';usageViewer.update(fixture);");
                 Check(await ScriptBool(browser, "document.body.innerText.includes('0.1% 미만 남음') && !document.querySelector('.uv-limit:last-of-type strong').innerText.startsWith('0%')"), "tiny actual remainder not rendered as zero");
                 await browser.ExecuteScriptAsync("fixture.providers[1].windows[1].pacingMessage='추천 페이스 보류 · 잔여량 확인 필요';fixture.providers[1].windows[1].pacingReason='잔여량 확인 필요';fixture.providers[1].windows[1].invalid=true;usageViewer.update(fixture);");
                 Check(await ScriptBool(browser, "document.body.innerText.includes('추천 페이스 보류 · 잔여량 확인 필요') && !document.body.innerText.includes('약0%')"), "rendered invalid advice held with reason");
+                await browser.ExecuteScriptAsync("window.dailyFixture=" + _dailyDocument + ";dailyFixture.providers.forEach(p=>{p.stale=false;p.windows.forEach(w=>w.expired=false)});");
+                foreach ((int width, bool both, bool docked) in new[] { (264, false, true), (280, false, false), (320, true, false) })
+                {
+                    host.ClientSize = new Size(width, 1000);
+                    await browser.ExecuteScriptAsync($"dailyFixture.showBoth={both.ToString().ToLowerInvariant()};dailyFixture.docked={docked.ToString().ToLowerInvariant()};dailyFixture.activeProvider='codex';usageViewer.update(dailyFixture);");
+                    Check(await ScriptBool(browser, "document.body.innerText.includes('오늘 남은 권장량: 17.00%') && !document.body.innerText.includes('오늘 권장 19.00%') && !document.body.innerText.includes('확인 사용') && !document.body.innerText.includes('다음 확인')"), "hourly daily allowance rendered " + width);
+                    Check(await ScriptBool(browser, "document.documentElement.scrollWidth<=innerWidth && [...document.querySelectorAll('.uv-limit')].every(e=>e.scrollWidth<=e.clientWidth+1)"), "daily allowance rows fit " + width);
+                    if(both) Check(await ScriptBool(browser, "document.body.innerText.includes('오늘 남은 권장량: 12.46%') && document.body.innerText.includes('100%')"), "independent Claude daily allowance and five hour quota rendered");
+                }
+                await browser.ExecuteScriptAsync("fixture.showBoth=false;fixture.activeProvider='claude';usageViewer.update(fixture);");
                 var messages = new System.Collections.Generic.List<string>();
                 browser.CoreWebView2.WebMessageReceived += (_, args) => messages.Add(args.WebMessageAsJson);
                 await browser.ExecuteScriptAsync("document.querySelector('[data-action=refresh]').click();document.querySelector('[data-action=hide]').click();document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}));document.getElementById('show-both').click();document.getElementById('show-both').click();document.querySelector('[data-provider=codex]').click();");

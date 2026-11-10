@@ -48,6 +48,12 @@ internal static class UsageDisplayHelper
 
     public static string GetWeeklyMessage(UsagePacingItem item)
     {
+        if (item.Daily != null && item.Reason == null && item.Level != UsagePacingLevel.Exhausted)
+        {
+            return "오늘 남은 권장량: " + FormatPacingPercent(item.Daily.RemainingPercent) +
+                   (item.Daily.UsedPercent > item.Daily.TargetPercent ? " · 초과 사용" : "");
+        }
+
         return item.Level switch
         {
             UsagePacingLevel.Recommended => "추천 페이스: 24시간에 약" +
@@ -62,14 +68,13 @@ internal static class UsageDisplayHelper
 
     private static string FormatPacingPercent(decimal percent)
     {
-        if (percent > 0 && percent < 0.1m)
+        if (percent > 0 && percent < 0.01m)
         {
-            return "0.1% 미만";
+            return "0.01% 미만";
         }
 
-        int digits = percent < 1 ? 1 : 0;
-        return decimal.Round(percent, digits, MidpointRounding.AwayFromZero)
-            .ToString("0.#", CultureInfo.InvariantCulture) + "%";
+        return decimal.Round(percent, 2, MidpointRounding.AwayFromZero)
+            .ToString("0.00", CultureInfo.InvariantCulture) + "%";
     }
 
     public static string FormatPacingDetails(UsagePacingAdvice advice)
@@ -118,8 +123,10 @@ internal static class UsageDisplayHelper
 
     public static string FormatPacingBasis(UsagePacingAdvice advice)
     {
-        return "남은 주간 한도를 초기화까지 고르게 나눠 쓸 때의 평균이에요. " +
-               "연속 24시간당 주간 한도의 비율이며, 사용을 보장하지 않아요." +
+        return "오늘 첫 조회에서 리셋까지 남은 양을 오늘 자정까지의 시간만큼 나눠요. " +
+               "그 권장량에서 한 시간마다 확인한 사용량을 빼요. " +
+               "새 버전의 첫 조회 전 사용량은 포함하지 않아요. 날짜가 바뀌면 남은 주간 한도로 새로 나눠요. " +
+               "주간 전체 한도의 비율이며, 사용을 보장하지 않아요." +
                (advice.ShortTerm?.Count > 0 ? " 5시간 한도는 따로 적용돼요." : "");
     }
 
