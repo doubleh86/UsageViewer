@@ -10,7 +10,8 @@ internal enum UsagePacingLevel
 
 internal sealed record UsagePacingItem(string BucketId, string? BucketName, UsageWindow Window,
                                        UsagePacingLevel Level, decimal? Average24Hours = null,
-                                       string? Reason = null, DailyUsageAllowance? Daily = null);
+                                       string? Reason = null, DailyUsageAllowance? Daily = null,
+                                       decimal? TomorrowEstimatePercent = null);
 
 internal sealed record DailyUsageAllowance(decimal TargetPercent, decimal UsedPercent, decimal RemainingPercent,
                                            DateTimeOffset StartedAt, DateTimeOffset CheckedAt);

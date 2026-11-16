@@ -33,7 +33,9 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
   const value=w.expired||w.invalid?'갱신 필요':percent(w.remaining)+' <small>남음</small>';
   let html='<div class="uv-limit"><div class="uv-line"><span class="uv-muted">'+esc(w.name)+'</span><strong class="'+(large||w.weekly?'uv-main-value':'')+'">'+value+'</strong></div>'+meter(p,w);
   if(w.weekly){
-   html+='<div class="'+(w.pacingReason?'uv-warning':'uv-weekly-status')+'">'+esc(w.pacingMessage||'추천 페이스 보류 · 최신 주간 정보 필요')+'</div>';
+   html+='<div class="'+(w.pacingReason?'uv-warning':'uv-weekly-status')+'">'+esc(w.pacingMessage||'추천 페이스 보류 · 최신 주간 정보 필요');
+   if(w.tomorrowMessage&&!w.pacingReason&&!w.invalid&&!w.expired&&!p.stale&&!p.error)html+='<br><span class="uv-muted">'+esc(w.tomorrowMessage)+'</span>';
+   html+='</div>';
   }
   if(w.shortTermWarning)html+='<div class="uv-warning">'+esc(w.shortTermWarning)+'</div>';
   if(!w.weekly&&w.pacingReason)html+='<div class="uv-warning">'+esc(w.pacingReason)+'</div>';

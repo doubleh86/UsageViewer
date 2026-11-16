@@ -50,6 +50,17 @@ internal static class UsageDisplayHelper
     {
         if (item.Daily != null && item.Reason == null && item.Level != UsagePacingLevel.Exhausted)
         {
+            if (HasTomorrowGuidance(item) == true)
+            {
+                if (item.Daily.UsedPercent > item.Daily.TargetPercent)
+                {
+                    return "내일 몫을 당겨 쓰는 중";
+                }
+
+                return item.Daily.RemainingPercent == 0 ? "오늘 몫 소진 · 이후 사용은 내일 몫에서 써요" :
+                       "오늘 " + FormatPacingPercent(item.Daily.RemainingPercent) + " 남음 · 초과 시 내일 몫 사용";
+            }
+
             return "오늘 남은 권장량: " + FormatPacingPercent(item.Daily.RemainingPercent) +
                    (item.Daily.UsedPercent > item.Daily.TargetPercent ? " · 초과 사용" : "");
         }
@@ -64,6 +75,19 @@ internal static class UsageDisplayHelper
             UsagePacingLevel.Exhausted => "주간 한도 소진 · 초기화를 기다려 주세요",
             _ => "추천 페이스 보류 · " + (item.Reason ?? "최신 주간 정보 필요")
         };
+    }
+
+    public static string GetTomorrowMessage(UsagePacingItem item)
+    {
+        return HasTomorrowGuidance(item) == true ?
+               "내일 예상 권장량: 약 " + FormatPacingPercent(item.TomorrowEstimatePercent!.Value) + " (참고)" : "";
+    }
+
+    private static bool HasTomorrowGuidance(UsagePacingItem item)
+    {
+        return item.Reason == null && item.Level is (UsagePacingLevel.Recommended or UsagePacingLevel.UntilReset) &&
+               item.Daily?.RemainingPercent is >= 0 and < 1 && item.TomorrowEstimatePercent is >= 0 &&
+               item.Window.RemainingPercent > 0;
     }
 
     private static string FormatPacingPercent(decimal percent)
@@ -95,6 +119,11 @@ internal static class UsageDisplayHelper
             if (item.Window.DurationMinutes == 10080)
             {
                 lines.Add(GetWeeklyMessage(item));
+                string tomorrow = GetTomorrowMessage(item);
+                if (tomorrow.Length > 0)
+                {
+                    lines.Add(tomorrow);
+                }
             }
             else if (item.Reason != null)
             {

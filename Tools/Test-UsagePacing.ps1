@@ -1,9 +1,89 @@
 ﻿param(
-    [string]$DotNetPath = (Join-Path $env:USERPROFILE '.dotnet/dotnet.exe')
+    [string]$DotNetPath = (Join-Path $env:USERPROFILE '.dotnet/dotnet.exe'),
+    [switch]$SourceOnly
 )
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
+if ($SourceOnly) {
+    # This mode never compiles or loads a DLL and does not start WebView2.
+    $model = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'src/UsageViewer/Models/UsagePacing.cs')
+    $tracker = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'src/UsageViewer/Services/DailyUsageAllowanceTracker.cs')
+    foreach ($record in @(@('DailyUsageAllowance', $model), @('AllowanceCheckpoint', $tracker))) {
+        $parameters = [regex]::Match($record[1], ('record ' + $record[0] + '\(([^;]+)\);')).Groups[1].Value
+        if (-not $parameters -or $parameters -match 'Tomorrow') {
+            throw ('Tomorrow guidance must stay outside the saved allowance contract: ' + $record[0])
+        }
+    }
+    $node = (Get-Command node -ErrorAction Stop).Source
+    $htmlProbe = @'
+const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
+const html = fs.readFileSync(process.argv[2], 'utf8');
+const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+assert.equal(scripts.length, 1);
+let passed = 2;
+const events = {}, docEvents = {}, messages = [];
+const app = {innerHTML:'', classList:{toggle(){}}, getBoundingClientRect:()=>({height:500}),
+    addEventListener:(name, handler)=>events[name]=handler};
+const window = {chrome:{webview:{postMessage:m=>messages.push(m)}}, addEventListener(){}};
+const document = {getElementById:id=>{assert.equal(id,'app');return app;},
+    addEventListener:(name, handler)=>docEvents[name]=handler};
+vm.runInNewContext(scripts[0][1], {window, document, requestAnimationFrame:f=>f(), console});
+function check(condition, label){assert.ok(condition,label);passed++;}
+const tomorrow = '내일 예상 권장량: 약 19.00% (참고)';
+const weekly = (message='오늘 0.50% 남음 · 초과 시 내일 몫 사용', estimate=tomorrow)=>({
+    name:'긴 모델 <A&B> '.repeat(5)+'주간 한도', shortName:'주간', remaining:57.5, weekly:true,
+    resetText:'초기화 11/13 00:00', pacingMessage:message, tomorrowMessage:estimate});
+const provider = (id, windows)=>({id,name:id,plan:'fixture',supported:true,windows,
+    pacing:{level:'recommended',basis:'주간 전체 한도의 참고값'},updated:'01:00'});
+const codex = provider('codex',[{name:'5시간 한도',remaining:0,weekly:false,
+    shortTermWarning:'5시간 한도 소진',resetText:'초기화 02:00',tomorrowMessage:'SHORT MUST NOT FORECAST'},
+    weekly(),weekly('오늘 남은 권장량: 1.00%','')]);
+const claude = provider('claude',[weekly('내일 몫을 당겨 쓰는 중','내일 예상 권장량: 약 8.25% (참고)')]);
+function render(providers=[codex,claude],showBoth=true,activeProvider='codex',docked=false){
+    window.usageViewer.update({providers,showBoth,activeProvider,docked});return app.innerHTML;
+}
+for(const both of [true,false]) for(const id of ['codex','claude']) for(const docked of [true,false]){
+    const rendered = render(undefined,both,id,docked);
+    check(rendered.includes('내일 예상 권장량:'),'guidance in combined/tabbed/docked markup');
+    check(!rendered.includes('SHORT MUST NOT FORECAST'),'short limit independent');
+    check(rendered.includes('&lt;A&amp;B&gt;')&&!rendered.includes('<A&B>'),'model names escaped');
+    check(!rendered.includes('dailyDetails')&&!rendered.includes('다음 확인'),'no expanded detail');
+    if(both||id==='codex'){
+        check(rendered.includes('오늘 남은 권장량: 1.00%')&&rendered.includes('5시간 한도 소진'),'ordinary row and short limit retained');
+        check(rendered.includes('<br><span class="uv-muted">'+tomorrow+'</span>'),'guidance uses two text lines');
+    }
+    if(both)check(rendered.includes('약 19.00%')&&rendered.includes('약 8.25%'),'providers retain separate estimates');
+}
+for(const message of ['오늘 몫 소진 · 이후 사용은 내일 몫에서 써요','내일 몫을 당겨 쓰는 중']){
+    check(render([provider('codex',[weekly(message)])]).includes(message),'exact/over budget wording retained');
+}
+for(const flag of ['invalid','expired','pacingReason']){
+    const row = {...weekly(),[flag]:true};
+    check(!render([provider('codex',[row])]).includes(tomorrow),'held row hides forecast '+flag);
+}
+for(const flag of ['stale','error']){
+    check(!render([{...codex,[flag]:true}]).includes(tomorrow),'failed provider hides forecast '+flag);
+}
+check(!render([provider('codex',[weekly('오늘 남은 권장량: 1.00%','')])]).includes('<br>'),'ordinary row stays one line');
+check(!render([provider('codex',[weekly('오늘 남은 권장량: 0.00%','')])]).includes('내일 예상'),'missing estimate is not zero');
+check(render([provider('codex',[weekly('오늘 몫 소진','내일 예상 권장량: 약 0.00% (참고)')])]).includes('약 0.00%'),'valid recommendation zero is displayable');
+check(render([provider('codex',[weekly('fixture','<img src=x onerror=bad()>')])]).includes('&lt;img'),'estimate text escaped');
+check(/\.uv-limit\{[^}]*overflow-wrap:anywhere/.test(html)&&/\.uv-weekly-status\{[^}]*overflow-wrap:anywhere/.test(html),'narrow row wrapping rules present (no layout measurement)');
+render(undefined,false,'codex');
+events.click({target:{closest:()=>({dataset:{provider:'claude'}})}});
+check(messages.some(m=>m.type==='provider'&&m.id==='claude')&&app.innerHTML.includes('약 8.25%'),'provider tab handler');
+events.change({target:{id:'show-both',checked:true}});
+check(messages.some(m=>m.type==='mode'&&m.showBoth)&&app.innerHTML.includes('약 19.00%'),'combined view handler');
+docEvents.keydown({key:'Escape'});
+check(messages.some(m=>m.type==='hide'),'Escape handler');
+console.log(`PASS: ${passed} source/HTML contract checks; no compilation, DLL, WebView2, or layout measurement.`);
+'@
+    $htmlProbe | & $node - (Join-Path $repoRoot 'src/UsageViewer/UI/Popup.html')
+    if ($LASTEXITCODE -ne 0) { throw 'Source/HTML contract checks failed.' }
+    return
+}
+
 $buildPath = Join-Path $repoRoot 'src/UsageViewer/bin/Release/net10.0-windows'
 $assemblyPath = Join-Path $buildPath 'UsageViewer.dll'
 if ((Test-Path -LiteralPath $assemblyPath) -eq $false) {
@@ -34,6 +114,7 @@ internal static class PacingProbe
     private static int _passed;
     private static string _document = "";
     private static string _dailyDocument = "";
+    private static string _tomorrowDocument = "";
     private static readonly DateTimeOffset Start = DateTimeOffset.Parse("2026-11-09T18:12:00+09:00");
     private static readonly DateTimeOffset DailyStart = DateTimeOffset.Parse("2026-11-09T00:00:00+09:00");
     private static readonly DateTimeOffset Reset = DateTimeOffset.Parse("2026-11-14T01:10:00+09:00");
@@ -56,6 +137,7 @@ internal static class PacingProbe
             CheckStateless();
             CheckDailyAllowance();
             CheckDailyFormula();
+            CheckTomorrowGuidance();
             CheckPresentation();
             CheckRendering();
             Console.WriteLine($"PASS: {_passed} synthetic usage-pacing checks; no accounts or user settings accessed.");
@@ -348,7 +430,7 @@ internal static class PacingProbe
         Check(Level(ApplyDaily(restarted, oldReceipt, DailyStart.AddHours(4))) == "Unavailable", "receipt regression held");
         object over = ApplyDaily(restarted, DailySnapshot(DailyStart.AddHours(5), 50), DailyStart.AddHours(5));
         Check(DailyValue(over, "RemainingPercent") == 0 && DailyValue(over, "UsedPercent") == 26 &&
-              Message(over).Contains("초과 사용"), "over-budget is distinct from actual quota exhaustion");
+              Message(over).Contains("내일 몫을 당겨 쓰는 중"), "over-budget is distinct from actual quota exhaustion");
         Check(Items(over).Single() is object && Get(Items(over).Single(), "Window") is object, "actual quota retained");
         SaveDaily(restarted);
         string stored = File.ReadAllText(path);
@@ -491,6 +573,169 @@ internal static class PacingProbe
         Check(DailyValue(restored, "RemainingPercent") == today - 2, "migrated target persists across restart");
     }
 
+    private static decimal? Tomorrow(object advice) =>
+        (decimal?)Get(Items(advice).Single(), "TomorrowEstimatePercent");
+    private static string TomorrowMessage(object advice) =>
+        (string)Static("UI.UsageDisplayHelper", "GetTomorrowMessage", Items(advice).Single());
+    private static decimal? DayEstimate(decimal remaining, decimal today, DateTimeOffset at,
+                                        DateTimeOffset reset, TimeZoneInfo zone) =>
+        (decimal?)Static("Services.DailyAllowanceHelper", "CalculateTomorrowEstimate", remaining, today, at, reset, zone);
+    private static (object Tracker, object Advice, object Snapshot) GuidanceCase(double remaining, string name)
+    {
+        object tracker = New("Services.DailyUsageAllowanceTracker", Path.Combine(_root, name + ".json"));
+        ApplyDaily(tracker, DailySnapshot(DailyStart, 76), DailyStart);
+        object snapshot = DailySnapshot(DailyStart.AddHours(1), remaining);
+        return (tracker, ApplyDaily(tracker, snapshot, DailyStart.AddHours(1)), snapshot);
+    }
+    private static void CheckNoTomorrow(object advice, string label)
+    {
+        Check(Items(advice).All(item => Get(item, "TomorrowEstimatePercent") == null &&
+              (string)Static("UI.UsageDisplayHelper", "GetTomorrowMessage", item) == ""), label);
+    }
+
+    private static void CheckTomorrowGuidance()
+    {
+        foreach ((double remaining, bool show) in new[] { (58.0001, false), (58d, false), (57.9999, true), (57.5, true) })
+        {
+            var sample = GuidanceCase(remaining, "threshold-" + remaining.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            Check((TomorrowMessage(sample.Advice).Length > 0) == show, "unrounded 1 percent threshold " + remaining);
+            Check(Tomorrow(sample.Advice) == 19m, "reserve today's unused share before tomorrow allocation");
+            Check(Message(sample.Advice).Contains("당겨 쓰는 중") == false &&
+                  Message(sample.Advice).Contains("소진") == false, "before over-budget never claims borrowing");
+            if (show == false)
+            {
+                Check(Message(sample.Advice) == "오늘 남은 권장량: 1.00%", "at or above 1 keeps original compact label");
+            }
+        }
+        var low = GuidanceCase(57.5, "tomorrow-low");
+        Check(Message(low.Advice) == "오늘 0.50% 남음 · 초과 시 내일 몫 사용" &&
+              TomorrowMessage(low.Advice) == "내일 예상 권장량: 약 19.00% (참고)", "two concise near-exhaustion lines");
+        Check(Details(low.Advice).Contains(TomorrowMessage(low.Advice)), "shared detail formatter includes reference estimate");
+        var tiny = GuidanceCase(57.0001, "tomorrow-tiny");
+        Check(Message(tiny.Advice).Contains("0.01% 미만") && Message(tiny.Advice).Contains("소진") == false,
+              "positive tiny daily remainder is not exhausted");
+        var exact = GuidanceCase(57, "tomorrow-exact");
+        Check(DailyValue(exact.Advice, "RemainingPercent") == 0 &&
+              Message(exact.Advice) == "오늘 몫 소진 · 이후 사용은 내일 몫에서 써요" && Tomorrow(exact.Advice) == 19,
+              "exact zero daily remainder with weekly quota is not actual exhaustion or existing borrowing");
+        var over = GuidanceCase(56.5, "tomorrow-over");
+        Check(Message(over.Advice) == "내일 몫을 당겨 쓰는 중" &&
+              TomorrowMessage(over.Advice) == "내일 예상 권장량: 약 18.83% (참고)", "confirmed overspend and two-decimal reference");
+        object latest = ApplyDaily(low.Tracker, DailySnapshot(DailyStart.AddMinutes(65), 56.5), DailyStart.AddMinutes(65));
+        Check(DailyValue(latest, "UsedPercent") == 18.5m && DailyValue(latest, "RemainingPercent") == 0.5m &&
+              Math.Abs(Tomorrow(latest)!.Value - 56m / 3) < 0.000001m &&
+              Message(latest).Contains("당겨 쓰는 중") == false, "latest real quota updates estimate without inventing hourly confirmation");
+
+        var zone = TimeZoneInfo.CreateCustomTimeZone("Tomorrow+9", TimeSpan.FromHours(9), "fixture", "fixture");
+        DateTimeOffset late = DateTimeOffset.Parse("2026-11-10T23:00:00+09:00");
+        DateTimeOffset dawn = DateTimeOffset.Parse("2026-11-11T02:00:00+09:00");
+        Check(DayEstimate(10, 0.5m, late, dawn, zone) == 9.5m, "tomorrow dawn reset allocates only the two available hours");
+        Check(DayEstimate(10, 0.5m, late, late.AddMinutes(30), zone) == null &&
+              DayEstimate(10, 0.5m, late, dawn.AddHours(-2), zone) == null, "today or exactly midnight reset creates no tomorrow share");
+        Check(DayEstimate(10, 0, late, dawn.AddHours(-2).AddTicks(1), zone) == 10,
+              "one tick after midnight has an actual tomorrow interval");
+        Check(DayEstimate(0, 0, late, dawn, zone) == null && DayEstimate(10, 0, dawn, dawn, zone) == null,
+              "actual zero or expired interval is not a successful zero estimate");
+        Check(DayEstimate(0.5m, 0.5m, late, dawn, zone) == 0, "valid zero forecast differs from absent forecast");
+        object reservedTracker = New("Services.DailyUsageAllowanceTracker", Path.Combine(_root, "tomorrow-reserved.json"));
+        ApplyDaily(reservedTracker, DailySnapshot(DailyStart, 0.8), DailyStart);
+        object reserved = ApplyDaily(reservedTracker, DailySnapshot(DailyStart.AddMinutes(30), 0.1), DailyStart.AddMinutes(30));
+        Check(Tomorrow(reserved) == 0 && TomorrowMessage(reserved).Contains("약 0.00%") &&
+              Message(reserved).Contains("소진") == false, "all current quota reserved for today is a real zero recommendation");
+        object resetTodayTracker = New("Services.DailyUsageAllowanceTracker", Path.Combine(_root, "tomorrow-today-reset.json"));
+        object resetToday = ApplyDaily(resetTodayTracker, DailySnapshot(DailyStart, 0.5, DailyStart.AddHours(10)), DailyStart);
+        CheckNoTomorrow(resetToday, "current date reset suppresses guidance even below 1 percent");
+        Check(Message(resetToday) == "오늘 남은 권장량: 0.50%", "no borrowing claim when current interval ends today");
+        object dawnTracker = New("Services.DailyUsageAllowanceTracker", Path.Combine(_root, "tomorrow-dawn-reset.json"));
+        object dawnAdvice = ApplyDaily(dawnTracker, DailySnapshot(late, 0.9, dawn), late);
+        Check(DailyValue(dawnAdvice, "TargetPercent") == 0.3m && Tomorrow(dawnAdvice) == 0.6m &&
+              TomorrowMessage(dawnAdvice).Contains("0.60%"), "tracker retains partial tomorrow even inside 24 hours");
+        object roundingTracker = New("Services.DailyUsageAllowanceTracker", Path.Combine(_root, "tomorrow-tiny-estimate.json"));
+        object tinyEstimate = ApplyDaily(roundingTracker, DailySnapshot(late, 0.0003, dawn), late);
+        Check(TomorrowMessage(tinyEstimate).Contains("0.01% 미만") &&
+              TomorrowMessage(tinyEstimate).Contains("0.00%") == false, "tiny positive forecast is never formatted as zero");
+        var exhausted = GuidanceCase(0, "tomorrow-weekly-zero");
+        CheckNoTomorrow(exhausted.Advice, "actual weekly exhaustion never forecasts tomorrow");
+        Check(Message(exhausted.Advice).Contains("주간 한도 소진"), "actual zero uses weekly exhaustion wording");
+
+        var eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+        foreach ((string start, string midnight, string finish, int hours) in new[] {
+            ("2026-03-07T12:00:00-05:00", "2026-03-08T00:00:00-05:00", "2026-03-11T00:00:00-04:00", 23),
+            ("2026-10-31T12:00:00-04:00", "2026-11-01T00:00:00-04:00", "2026-11-04T00:00:00-05:00", 25) })
+        {
+            DateTimeOffset at = DateTimeOffset.Parse(start), tomorrow = DateTimeOffset.Parse(midnight);
+            DateTimeOffset reset = DateTimeOffset.Parse(finish);
+            decimal expected = 57m * TimeSpan.FromHours(hours).Ticks / (reset - tomorrow).Ticks;
+            Check(Math.Abs(DayEstimate(60, 3, at, reset, eastern)!.Value - expected) < 0.000001m,
+                  "tomorrow DST interval has actual " + hours + " hours");
+            Check(DayEstimate(60, 3, at.ToOffset(TimeSpan.FromHours(9)), reset, eastern) ==
+                  DayEstimate(60, 3, at, reset, eastern), "forecast uses selected local date rather than input offset");
+        }
+        foreach ((string start, string end) in new[] {
+            ("2026-03-08T00:00:00-05:00", "2026-03-11T00:00:00-04:00"),
+            ("2026-11-01T00:00:00-04:00", "2026-11-04T00:00:00-05:00") })
+        {
+            Check(DayEstimate(60, 3, DateTimeOffset.Parse(start), DateTimeOffset.Parse(end), eastern) == 28.5m,
+                  "today DST does not shift tomorrow midnight by a fixed 24 hours");
+        }
+        var midnightRule = TimeZoneInfo.AdjustmentRule.CreateAdjustmentRule(new DateTime(2026, 1, 1),
+            new DateTime(2026, 12, 31), TimeSpan.FromHours(1),
+            TimeZoneInfo.TransitionTime.CreateFixedDateRule(new DateTime(1, 1, 1, 0, 0, 0), 3, 8),
+            TimeZoneInfo.TransitionTime.CreateFixedDateRule(new DateTime(1, 1, 1, 1, 0, 0), 11, 1));
+        var midnightZone = TimeZoneInfo.CreateCustomTimeZone("MidnightDST", TimeSpan.FromHours(-5),
+            "fixture", "standard", "daylight", [midnightRule]);
+        Check(Math.Abs(DayEstimate(9, 0, DateTimeOffset.Parse("2026-03-07T12:00:00-05:00"),
+              DateTimeOffset.Parse("2026-03-10T00:00:00-04:00"), midnightZone)!.Value - 9m * 23 / 47) < 0.000001m,
+              "invalid local midnight advances to the first valid minute");
+        Check(Math.Abs(DayEstimate(9, 0, DateTimeOffset.Parse("2026-10-31T12:00:00-04:00"),
+              DateTimeOffset.Parse("2026-11-03T00:00:00-05:00"), midnightZone)!.Value - 9m * 25 / 49) < 0.000001m,
+              "ambiguous local midnight uses the earlier instant consistently");
+
+        foreach (object invalid in new[] {
+            ApplyDaily(low.Tracker, low.Snapshot, DailyStart.AddHours(1), error: "fixture"),
+            ApplyDaily(low.Tracker, low.Snapshot, DailyStart.AddHours(1), stale: true),
+            ApplyDaily(low.Tracker, low.Snapshot, DailyStart.AddMinutes(76)),
+            ApplyDaily(low.Tracker, low.Snapshot, DailyStart.AddMinutes(59)),
+            ApplyDaily(low.Tracker, DailySnapshot(DailyStart.AddMinutes(59), 57), DailyStart.AddMinutes(66)) })
+        {
+            CheckNoTomorrow(invalid, "failure, stale, old, clock or receipt regression does not forecast");
+        }
+        object missing = ApplyDaily(low.Tracker, Snapshot(DailyStart, Bucket("short", Window(5, 300))), DailyStart);
+        CheckNoTomorrow(missing, "weekly missing does not fabricate tomorrow");
+        object noSnapshot = Invoke(low.Tracker, "Apply", "codex", null, Evaluate(null, DailyStart), DailyStart, zone);
+        CheckNoTomorrow(noSnapshot, "no received snapshot does not fabricate tomorrow");
+        string badPath = Path.Combine(_root, "tomorrow-corrupt.json");
+        File.WriteAllText(badPath, "broken");
+        object bad = New("Services.DailyUsageAllowanceTracker", badPath);
+        CheckNoTomorrow(ApplyDaily(bad, low.Snapshot, DailyStart.AddHours(1)), "corrupt storage does not forecast");
+        string blockedPath = Path.Combine(_root, "tomorrow-blocked");
+        Directory.CreateDirectory(blockedPath);
+        object blocked = New("Services.DailyUsageAllowanceTracker", blockedPath);
+        ApplyDaily(blocked, DailySnapshot(DailyStart, 0.5), DailyStart);
+        SaveDaily(blocked);
+        CheckNoTomorrow(ApplyDaily(blocked, DailySnapshot(DailyStart.AddMinutes(1), 0.5), DailyStart.AddMinutes(1)),
+                        "save failure does not forecast");
+
+        object multiTracker = New("Services.DailyUsageAllowanceTracker", Path.Combine(_root, "tomorrow-multi.json"));
+        object multi = Snapshot(DailyStart, Bucket("a", Window(0.8, 10080, DailyStart.AddDays(4))),
+            Bucket("b", Window(0, 300), Window(0.9, 10080, DailyStart.AddDays(3))));
+        object codex = ApplyDaily(multiTracker, multi, DailyStart);
+        object claude = ApplyDaily(multiTracker, DailySnapshot(DailyStart, 0.4), DailyStart, "claude");
+        Check((decimal)Get(Items(codex)[0], "TomorrowEstimatePercent")! == 0.2m &&
+              (decimal)Get(Items(codex)[1], "TomorrowEstimatePercent")! == 0.3m && Tomorrow(claude) == 0.1m,
+              "providers and multiple weekly models retain independent estimates");
+        Check((string)Static("UI.UsageDisplayHelper", "FormatShortTermWarning", Items(codex, "ShortTerm").Single()) ==
+              "5시간 한도 소진 · 초기화를 기다려 주세요", "five-hour exhaustion remains independent");
+        Check(Get(Items(codex, "ShortTerm").Single(), "TomorrowEstimatePercent") == null, "short limits never get tomorrow data");
+        SaveDaily(low.Tracker);
+        using JsonDocument journal = JsonDocument.Parse(File.ReadAllText(Path.Combine(_root, "tomorrow-low.json")));
+        string[] fields = { "BaselineRemaining", "Target", "CheckedRemaining", "StartedAt", "CheckedAt", "LastReceipt", "ResetsAt" };
+        Check(journal.RootElement.EnumerateObject().All(pair => pair.Value.EnumerateObject().Select(p => p.Name).Order()
+              .SequenceEqual(fields.Order())), "derived forecast never changes journal fields");
+        Check(TypeOf("Models.DailyUsageAllowance").GetProperties().All(p => p.Name.Contains("Tomorrow") == false),
+              "derived guidance remains outside daily allowance model");
+    }
+
     private static void CheckPresentation()
     {
         object snapshot = Sample();
@@ -565,6 +810,32 @@ internal static class PacingProbe
                 Check(row.GetProperty("pacingMessage").GetString() == "오늘 남은 권장량: 17.00%" &&
                       row.TryGetProperty("dailyDetails", out _) == false, "actual daily popup payload uses shared checkpoint");
                 Check(row.GetProperty("remaining").GetDouble() == 74, "real quota stays separate from daily allowance");
+                Check(row.GetProperty("tomorrowMessage").GetString() == "", "no extra line for daily remainder above 1");
+            }
+            object tomorrowTracker = New("Services.DailyUsageAllowanceTracker", Path.Combine(_root, "tomorrow-render.json"));
+            object tomorrowFirst = Snapshot(DailyStart,
+                Bucket("near", Window(0, 300), Window(76, 10080, DailyStart.AddDays(4)), "LongModelName <A&B> " + new string('x', 80)),
+                Bucket("exact", Window(76, 10080, DailyStart.AddDays(4))),
+                Bucket("over", Window(76, 10080, DailyStart.AddDays(4))));
+            ApplyDaily(tomorrowTracker, tomorrowFirst, DailyStart);
+            object tomorrowSnapshot = Snapshot(DailyStart.AddHours(1),
+                Bucket("near", Window(0, 300), Window(57.5, 10080, DailyStart.AddDays(4)), "LongModelName <A&B> " + new string('x', 80)),
+                Bucket("exact", Window(57, 10080, DailyStart.AddDays(4))),
+                Bucket("over", Window(56.5, 10080, DailyStart.AddDays(4))));
+            object tomorrowAdvice = ApplyDaily(tomorrowTracker, tomorrowSnapshot, DailyStart.AddHours(1));
+            ApplyDaily(tomorrowTracker, DailySnapshot(DailyStart, 40), DailyStart, "claude");
+            object tomorrowClaude = DailySnapshot(DailyStart.AddHours(1), 30.5);
+            object tomorrowClaudeAdvice = ApplyDaily(tomorrowTracker, tomorrowClaude, DailyStart.AddHours(1), "claude");
+            Invoke(popup, "SetState", tomorrowSnapshot, false, null, tomorrowClaude, null, false, tomorrowAdvice, tomorrowClaudeAdvice);
+            _tomorrowDocument = JsonSerializer.Serialize(Invoke(popup, "BuildDocumentState"));
+            using (JsonDocument tomorrowPayload = JsonDocument.Parse(_tomorrowDocument))
+            {
+                JsonElement[] rows = tomorrowPayload.RootElement.GetProperty("providers")[0].GetProperty("windows")
+                    .EnumerateArray().Where(row => row.GetProperty("weekly").GetBoolean()).ToArray();
+                Check(rows.Length == 3 && rows[0].GetProperty("tomorrowMessage").GetString() == "내일 예상 권장량: 약 19.00% (참고)" &&
+                      rows[1].GetProperty("pacingMessage").GetString()!.Contains("이후 사용은") &&
+                      rows[2].GetProperty("pacingMessage").GetString() == "내일 몫을 당겨 쓰는 중",
+                      "actual popup JSON carries independent before, exact, and over-budget guidance");
             }
             Invoke(bar, "LayoutDock");
             object size = Get(bar, "ClientSize")!;
@@ -659,6 +930,18 @@ internal static class PacingProbe
                     Check(await ScriptBool(browser, "document.body.innerText.includes('오늘 남은 권장량: 17.00%') && !document.body.innerText.includes('오늘 권장 19.00%') && !document.body.innerText.includes('확인 사용') && !document.body.innerText.includes('다음 확인')"), "hourly daily allowance rendered " + width);
                     Check(await ScriptBool(browser, "document.documentElement.scrollWidth<=innerWidth && [...document.querySelectorAll('.uv-limit')].every(e=>e.scrollWidth<=e.clientWidth+1)"), "daily allowance rows fit " + width);
                     if(both) Check(await ScriptBool(browser, "document.body.innerText.includes('오늘 남은 권장량: 12.46%') && document.body.innerText.includes('100%')"), "independent Claude daily allowance and five hour quota rendered");
+                }
+                await browser.ExecuteScriptAsync("window.tomorrowFixture=" + _tomorrowDocument + ";tomorrowFixture.providers.forEach(p=>{p.stale=false;p.windows.forEach(w=>w.expired=false)});");
+                foreach ((int width, bool both, bool docked) in new[] { (264, false, true), (264, true, true), (280, false, false), (320, true, false) })
+                {
+                    host.ClientSize = new Size(width, 1800);
+                    await browser.ExecuteScriptAsync($"tomorrowFixture.showBoth={both.ToString().ToLowerInvariant()};tomorrowFixture.docked={docked.ToString().ToLowerInvariant()};tomorrowFixture.activeProvider='codex';usageViewer.update(tomorrowFixture);");
+                    Check(await ScriptBool(browser, "document.body.innerText.includes('오늘 0.50% 남음 · 초과 시 내일 몫 사용') && document.body.innerText.includes('이후 사용은 내일 몫에서 써요') && document.body.innerText.includes('내일 몫을 당겨 쓰는 중') && document.body.innerText.includes('약 18.83% (참고)')"), "three distinct tomorrow states " + width);
+                    Check(await ScriptBool(browser, "[...document.querySelectorAll('.uv-weekly-status')].every(e=>e.querySelectorAll('br').length===1 && e.clientHeight<=2*parseFloat(getComputedStyle(e).lineHeight)+1)"), "near-exhaustion guidance fits two lines " + width);
+                    Check(await ScriptBool(browser, "document.documentElement.scrollWidth<=innerWidth && [...document.querySelectorAll('.uv-limit')].every(e=>e.scrollWidth<=e.clientWidth+1) && document.querySelectorAll('script').length===1"), "tomorrow long models fit and escape " + width);
+                    Check(await ScriptBool(browser, "document.body.innerText.includes('5시간 한도 소진') && !document.body.innerText.includes('다음 확인') && !document.body.innerText.includes('확인 사용')"), "short quota remains separate without expanded details " + width);
+                    await browser.ExecuteScriptAsync("tomorrowFixture.showBoth=false;tomorrowFixture.activeProvider='claude';usageViewer.update(tomorrowFixture);");
+                    Check(await ScriptBool(browser, "document.body.innerText.includes('약 10.00% (참고)') && !document.body.innerText.includes('약 19.00%') && document.documentElement.scrollWidth<=innerWidth"), "Claude tab has independent estimate " + width);
                 }
                 await browser.ExecuteScriptAsync("fixture.showBoth=false;fixture.activeProvider='claude';usageViewer.update(fixture);");
                 var messages = new System.Collections.Generic.List<string>();

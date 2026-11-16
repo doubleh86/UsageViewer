@@ -143,22 +143,28 @@ internal sealed class DailyUsageAllowanceTracker
                         if (_entries.ContainsKey(key) == false)
                         {
                             weekly.Add(item with { Reason = "오늘 기준 기록 개수 초과", Daily = null,
+                                                    TomorrowEstimatePercent = null,
                                                     Level = UsagePacingLevel.Unavailable });
                             continue;
                         }
                     }
 
                     decimal used = Math.Max(0, entry.BaselineRemaining - entry.CheckedRemaining);
+                    decimal todayRemaining = Math.Min(remaining, Math.Max(0, entry.Target - used));
+                    decimal? tomorrow = DailyAllowanceHelper.CalculateTomorrowEstimate(remaining, todayRemaining,
+                                                                                       now, entry.ResetsAt, zone);
                     weekly.Add(item with
                     {
-                        Daily = new DailyUsageAllowance(entry.Target, used,
-                            Math.Min(remaining, Math.Max(0, entry.Target - used)), entry.StartedAt, entry.CheckedAt)
+                        Daily = new DailyUsageAllowance(entry.Target, used, todayRemaining,
+                                                       entry.StartedAt, entry.CheckedAt),
+                        TomorrowEstimatePercent = tomorrow
                     });
                     continue;
                 }
             }
 
             weekly.Add(item with { Reason = reason ?? "오늘 기준을 확인하지 못했어요", Daily = null,
+                                    TomorrowEstimatePercent = null,
                                     Level = UsagePacingLevel.Unavailable });
         }
 

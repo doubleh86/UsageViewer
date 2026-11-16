@@ -1,5 +1,30 @@
 # 오늘 남은 권장량
 
+## 2026-11-17 오늘 소진 임박 시 내일 예상 안내
+
+- 목표: 오늘 남은 권장량이 0 이상 1% 미만일 때만 내일 예상과 초과 전/정확한 소진/실제 초과를
+  짧게 구분한다. 1% 이상은 기존 표시와 접힌 도움말·리셋 문구를 유지한다.
+- 계산: 최신 실제 주간 잔여에서 오늘 미사용 권장량을 예약하고, 다음 로컬 자정부터 현 주간 리셋까지
+  남은 실제 시간에 비례해 내일 구간(다음 자정 또는 리셋까지)을 배분한다. 기존 자정/DST 처리와 공유한다.
+  내일 예상은 두 자리 소수 참고값이며 저장하지 않는다. 오늘 리셋·실제 주간 소진·오류·오래됨·보류에는 만들지 않는다.
+- 범위: UsagePacing 모델, DailyAllowanceHelper/Tracker, UsageDisplayHelper, UsagePopup/Popup.html,
+  Test-UsagePacing.ps1, README와 이 계획. 제공자/모델별 독립 계산과 5시간 한도 표시를 유지한다.
+- 검증 계획: 기존 합성 검증에 0/1 경계·초과 구분·오늘/내일 새벽 리셋·DST·오류·독립 구간을 추가한다.
+  이번 요청에서는 빌드하지 않고 소스/HTML/정적 검증과 diff 검사만 수행한다.
+  갱신 DLL의 합성 검증과 WebView2 264/280/320 DIP 실제 배치는 미실행으로 구분해 기록한다.
+- 작업 경계: orchestrator가 준비한 격리 worktree 안에서만 수정하고 커밋/통합/push/배포하지 않는다.
+  시작 시 worktree는 clean이며 원본의 다섯 dirty 파일과 11/10 막대 `|` 변경은 이 체크아웃에 없다.
+  Main 통합 시 원본 Docs/Plan/UsagePacing.md, README.md, Tools/Test-UsagePacing.ps1,
+  src/UsageViewer/UI/Popup.html, src/UsageViewer/UI/UsagePopup.cs의 미커밋 변경을 함께 보존해야 한다.
+- 상태: 구현 완료. 예상값은 UsagePacingItem에만 파생 전달하며 DailyUsageAllowance/저장 필드는 유지한다.
+  1% 미만의 안내는 초과 전/정확한 소진/확인 초과를 구분하는 첫 줄과 내일 예상 참고값의 둘째 줄로 표시한다.
+  내일 예상은 최신 수신 잔여를 쓰고 초과 여부는 기존 시간별 확인 사용량을 따른다.
+- 검증: `Tools/Test-UsagePacing.ps1 -SourceOnly`의 저장 계약·실제 HTML 문자열/이벤트 검사 65개 통과.
+  변경 C# 5개와 추가 합성 C#의 Roslyn 구문 분석, PowerShell AST 구문 분석을 통과했다.
+  `git diff --check` 통과, 지정 9개 경로의 자기 diff/범위 확인. 소스 검사는 계산 실행/타입 검사나 배치 측정이 아니다.
+  DLL 합성 검증과 WebView2 264/280/320 DIP 줄 수·가로 넘침 검사는 추가했으나 실행하지 않았다.
+  빌드/패키징/실계정/인증/사용자 앱/설정 접근 및 커밋/배포/push는 수행하지 않았다.
+
 ## 2026-11-10 상세 보조 문구 축소
 
 - 요청: 기준·다음 확인 등 보조 정보를 제거하고 오늘 남은 권장량과 주간 리셋 시간만 간단히 표시한다.

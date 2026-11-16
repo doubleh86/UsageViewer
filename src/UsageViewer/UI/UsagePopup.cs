@@ -368,6 +368,8 @@ internal sealed class UsagePopup : Form
                         pacingReason = pacingItem?.Reason,
                         pacingMessage = window.DurationMinutes == 10080 && pacingItem != null ?
                                         UsageDisplayHelper.GetWeeklyMessage(pacingItem) : null,
+                        tomorrowMessage = window.DurationMinutes == 10080 && pacingItem != null ?
+                                          UsageDisplayHelper.GetTomorrowMessage(pacingItem) : null,
                         shortTermWarning = pacingItem != null ? UsageDisplayHelper.FormatShortTermWarning(pacingItem) : ""
                     });
                 }
