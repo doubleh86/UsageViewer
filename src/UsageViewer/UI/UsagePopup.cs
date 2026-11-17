@@ -353,6 +353,10 @@ internal sealed class UsagePopup : Form
                                  window.UsedPercent >= 0 && window.UsedPercent <= 100;
                     UsagePacingItem? pacingItem = (advice.Weekly ?? []).Concat(advice.ShortTerm ?? [])
                         .FirstOrDefault(item => item.BucketId == bucket.Id && ReferenceEquals(item.Window, window));
+                    double? dailyBoundaryRemaining = valid == true && window.DurationMinutes == 10080 &&
+                        pacingItem?.Reason == null && pacingItem?.Daily != null &&
+                        pacingItem.Level is UsagePacingLevel.Recommended or UsagePacingLevel.UntilReset ?
+                        Math.Clamp(window.RemainingPercent - (double)pacingItem.Daily.RemainingPercent, 0, 100) : null;
                     windows.Add(new
                     {
                         name,
@@ -365,6 +369,7 @@ internal sealed class UsagePopup : Form
                         resetText = UsageDisplayHelper.FormatReset(window),
                         weekly = window.DurationMinutes == 10080,
                         average24Hours = pacingItem?.Average24Hours,
+                        dailyBoundaryRemaining,
                         pacingReason = pacingItem?.Reason,
                         pacingMessage = window.DurationMinutes == 10080 && pacingItem != null ?
                                         UsageDisplayHelper.GetWeeklyMessage(pacingItem) : null,

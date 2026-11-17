@@ -753,6 +753,8 @@ internal static class PacingProbe
             JsonElement window = provider.GetProperty("windows")[0];
             Check(window.GetProperty("remaining").GetDouble() == 76 && Math.Abs(window.GetProperty("average24Hours").GetDecimal() - 17.714m) < 0.001m,
                   "popup real DLL remaining/average payload");
+            Check(window.GetProperty("dailyBoundaryRemaining").ValueKind == JsonValueKind.Null,
+                  "average without daily allowance has no marker");
             Check(pacing.GetProperty("message").GetString() == Message(advice) && pacing.GetProperty("detail").GetString() == Details(advice),
                   "popup shared values");
             string basis = pacing.GetProperty("basis").GetString()!;
@@ -811,6 +813,9 @@ internal static class PacingProbe
                       row.TryGetProperty("dailyDetails", out _) == false, "actual daily popup payload uses shared checkpoint");
                 Check(row.GetProperty("remaining").GetDouble() == 74, "real quota stays separate from daily allowance");
                 Check(row.GetProperty("tomorrowMessage").GetString() == "", "no extra line for daily remainder above 1");
+                Check(Math.Abs(row.GetProperty("dailyBoundaryRemaining").GetDouble() -
+                      (74 - (double)DailyValue(dailyAdvice, "RemainingPercent"))) < 0.000001,
+                      "daily marker subtracts allowance from actual quota");
             }
             object tomorrowTracker = New("Services.DailyUsageAllowanceTracker", Path.Combine(_root, "tomorrow-render.json"));
             object tomorrowFirst = Snapshot(DailyStart,
@@ -929,6 +934,7 @@ internal static class PacingProbe
                     await browser.ExecuteScriptAsync($"dailyFixture.showBoth={both.ToString().ToLowerInvariant()};dailyFixture.docked={docked.ToString().ToLowerInvariant()};dailyFixture.activeProvider='codex';usageViewer.update(dailyFixture);");
                     Check(await ScriptBool(browser, "document.body.innerText.includes('오늘 남은 권장량: 17.00%') && !document.body.innerText.includes('오늘 권장 19.00%') && !document.body.innerText.includes('확인 사용') && !document.body.innerText.includes('다음 확인')"), "hourly daily allowance rendered " + width);
                     Check(await ScriptBool(browser, "document.documentElement.scrollWidth<=innerWidth && [...document.querySelectorAll('.uv-limit')].every(e=>e.scrollWidth<=e.clientWidth+1)"), "daily allowance rows fit " + width);
+                    Check(await ScriptBool(browser, "[...document.querySelectorAll('.uv-daily-marker')].length===" + (both ? "2" : "1") + " && [...document.querySelectorAll('.uv-daily-marker')].every(m=>{const t=m.parentElement.getBoundingClientRect(),r=m.getBoundingClientRect();return Math.abs((r.left+r.width/2-t.left)/t.width*100-parseFloat(m.style.left))<0.1 && r.height===10})"), "daily marker position and height " + width);
                     if(both) Check(await ScriptBool(browser, "document.body.innerText.includes('오늘 남은 권장량: 12.46%') && document.body.innerText.includes('100%')"), "independent Claude daily allowance and five hour quota rendered");
                 }
                 await browser.ExecuteScriptAsync("window.tomorrowFixture=" + _tomorrowDocument + ";tomorrowFixture.providers.forEach(p=>{p.stale=false;p.windows.forEach(w=>w.expired=false)});");
@@ -943,6 +949,10 @@ internal static class PacingProbe
                     await browser.ExecuteScriptAsync("tomorrowFixture.showBoth=false;tomorrowFixture.activeProvider='claude';usageViewer.update(tomorrowFixture);");
                     Check(await ScriptBool(browser, "document.body.innerText.includes('약 10.00% (참고)') && !document.body.innerText.includes('약 19.00%') && document.documentElement.scrollWidth<=innerWidth"), "Claude tab has independent estimate " + width);
                 }
+                await browser.ExecuteScriptAsync("dailyFixture.showBoth=false;dailyFixture.activeProvider='codex';const w=dailyFixture.providers[0].windows[0];w.remaining=65;w.dailyBoundaryRemaining=57.23;usageViewer.update(dailyFixture);");
+                Check(await ScriptBool(browser, "document.querySelector('.uv-daily-marker').style.left==='57.23%' && document.querySelector('.uv-track>span').style.width==='65%'"), "screenshot allowance boundary preserves actual fill");
+                await browser.ExecuteScriptAsync("dailyFixture.providers[0].stale=true;usageViewer.update(dailyFixture);");
+                Check(await ScriptBool(browser, "!document.querySelector('.uv-daily-marker')"), "stale daily allowance hides marker");
                 await browser.ExecuteScriptAsync("fixture.showBoth=false;fixture.activeProvider='claude';usageViewer.update(fixture);");
                 var messages = new System.Collections.Generic.List<string>();
                 browser.CoreWebView2.WebMessageReceived += (_, args) => messages.Add(args.WebMessageAsJson);
