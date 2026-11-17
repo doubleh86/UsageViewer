@@ -10,6 +10,7 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
 .uv-limits{font-size:10px;color:#a8b5c6;margin:0 0 7px;overflow-wrap:anywhere}
 .uv-track.uv-low>span{background:#f88b98}.uv-track.uv-critical>span{background:#ff697e}.uv-alert-note{margin:7px 0;padding:6px 8px;border-radius:5px;background:#3d202a;color:#ffbdc5;font-size:11px;overflow-wrap:anywhere}.uv-alert-note.uv-critical{background:#5c2430;color:#ffd8dd}
 .uv-weekly-status{margin-top:6px;font-size:11px;overflow-wrap:anywhere}.uv-help{margin-top:10px;color:#a8b5c6;font-size:11px;overflow-wrap:anywhere}.uv-help summary{cursor:pointer;min-height:26px;line-height:26px}.uv-help summary:focus-visible{outline:2px solid #73dec1}.uv-help p{margin:3px 0 0}.uv-limit{margin-top:12px;overflow-wrap:anywhere}.uv-limit:first-child{margin-top:0}
+.uv-track{position:relative;overflow:visible}.uv-track>span{border-radius:2px}.uv-daily-marker{position:absolute;left:0;top:-3px;width:2px;height:10px;background:#edf2f8;border-radius:1px;transform:translateX(-50%);box-shadow:0 0 0 1px #171d25}
 </style></head>
 <body><main id="app" class="uv-window" aria-label="AI 사용량"><header><strong>Usage</strong></header><div class="uv-empty">설치된 AI 확인 중…</div></main>
 <script>
@@ -26,7 +27,16 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
  function actions(){return '<div class="uv-actions"><button type="button" data-action="refresh" aria-label="새로고침" '+(state.refreshing?'disabled':'')+'>'+refreshIcon+'</button><button type="button" data-action="hide" aria-label="숨기기">'+closeIcon+'</button></div>'}
  function tabs(){return '<div class="uv-tabs" role="group" aria-label="서비스 선택">'+state.providers.map(p=>'<button type="button" data-provider="'+esc(p.id)+'" aria-pressed="'+(p.id===state.activeProvider)+'">'+esc(p.name)+'</button>').join('')+'</div>'}
  function brand(p){return '<div class="uv-brand"><span class="uv-mark uv-'+esc(p.id)+'">'+(p.id==='codex'?'C':p.id==='claude'?'✳':'·')+'</span><strong>'+esc(p.name)+'</strong><span class="uv-muted">'+esc(p.plan||'감지됨')+'</span></div>'}
- function meter(p,w){if(w.invalid||w.expired)return '<div class="uv-small uv-muted">'+(w.invalid?'잔여량 확인 필요':'새 수신 필요')+'</div>';return '<div class="uv-track '+(p.id==='claude'?'uv-cl-track ':'')+(w.alert==='critical'?'uv-critical':w.alert==='warning'?'uv-low':'')+'"><span style="width:'+(w.expired||w.invalid?0:Math.max(0,Math.min(100,w.remaining)))+'%"></span></div>'}
+ function meter(p,w){
+  if(w.invalid||w.expired)return '<div class="uv-small uv-muted">'+(w.invalid?'잔여량 확인 필요':'새 수신 필요')+'</div>';
+  let marker='';
+  if(w.weekly&&!p.stale&&!p.error&&!w.pacingReason&&Number.isFinite(w.remaining)&&w.remaining>0&&w.remaining<=100&&Number.isFinite(w.dailyBoundaryRemaining)){
+   const boundary=Math.max(0,Math.min(w.remaining,w.dailyBoundaryRemaining));
+   const label='오늘 권장량 사용 후 '+percent(boundary)+' 남음';
+   marker='<i class="uv-daily-marker" role="img" aria-label="'+esc(label)+'" title="'+esc(label)+'" style="left:'+boundary+'%"></i>';
+  }
+  return '<div class="uv-track '+(p.id==='claude'?'uv-cl-track ':'')+(w.alert==='critical'?'uv-critical':w.alert==='warning'?'uv-low':'')+'"><span style="width:'+Math.max(0,Math.min(100,w.remaining))+'%"></span>'+marker+'</div>';
+ }
  function alertNotice(p){const low=p.windows.filter(w=>w.alert==='critical'||w.alert==='warning').sort((a,b)=>a.remaining-b.remaining);if(!low.length)return '';const w=low[0],critical=w.alert==='critical';return '<div class="uv-alert-note '+(critical?'uv-critical':'')+'">! '+(critical?'레드 얼럿':'사용량 주의')+' · '+esc(w.shortName)+' '+percent(w.remaining)+' 남음</div>'}
  function pacing(p){if(!p.pacing)return '';const a=p.pacing;return (a.level==='unavailable'&&!p.windows.some(w=>w.weekly)?'<div class="uv-warning">'+esc(a.reason||a.message)+'</div>':'')+'<details class="uv-help" data-help="'+esc(p.id)+'" '+(helpOpen.has(p.id)?'open':'')+'><summary>오늘 권장량은 뭔가요?</summary><p>'+esc(a.basis)+'</p></details>'}
  function limit(p,w,large){
