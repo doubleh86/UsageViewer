@@ -121,6 +121,8 @@ pwsh -NoProfile -File .\Tools\Test-CodexProfileFallback.ps1
 탐색 완료는 수신 성공이 아니다. 현재 시도에 속한 공식 페이지의 사용량 응답을 파싱하고 한도를
 `%LOCALAPPDATA%/UsageViewer/claude-web-usage.json`에 안전하게 교체한 뒤에만 마지막 정상 수신 시각을 갱신한다.
 자동과 수동은 같은 시도를 공유한다. 초기화는 최대 60초, 사용량 시도는 최대 30초 기다린다.
+갱신 탐색이 같은 최상위 문서에서 `claude.ai`의 초기 `/settings` 화면을 경유하면, 기존 30초 안에서
+사용량 페이지로 이동하는지 기다린다. 설정 화면에 머무르거나 다른 문서·출처로 바뀌면 성공으로 처리하지 않는다.
 
 - **조회 중 / 일시 오류**: 유효한 직전 값에 `↻` / `!`를 표시한다. 15분을 초과하면 **갱신 지연**으로 바뀐다.
   리셋이 지난 행은 **갱신 중**으로 표시하며, 정상적으로 소진된 `0%`나 미제공과 구분한다.
@@ -138,6 +140,11 @@ pwsh -NoProfile -File .\Tools\Test-CodexProfileFallback.ps1
 ```powershell
 pwsh -NoProfile -File .\Tools\Test-ClaudeRefreshReliability.ps1 -SourceOnly
 ```
+
+Release 빌드 후 `pwsh -NoProfile -File .\Tools\Test-UsagePacing.ps1 -ClaudeRefreshOnly`로
+실제 DLL의 합성 회귀와 격리된 WebView2 탐색을 검사할 수 있다. 탐색 fixture는 임시 프로필에서 요청을
+가로채고 외부 연결을 차단한다. 합성 302 → 설정 화면 → 같은 문서의 사용량 경로 → 200에서 기존 탐색 실패와
+변경 후 정상 캐시 저장을 확인했다. 이는 실계정의 실패 경로를 확인한 결과가 아니다.
 
 ### Claude 갱신 검증 기록 (2026-11-19)
 

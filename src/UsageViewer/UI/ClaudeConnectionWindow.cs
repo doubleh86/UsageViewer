@@ -36,6 +36,8 @@ internal sealed class ClaudePageAttempt(ClaudeRefreshAttempt attempt)
 
 internal sealed record ClaudeDocumentFailure(string Loader, string Frame, int Status, DateTimeOffset? RetryAfter);
 
+internal enum ClaudeRefreshRoute { Other, SettingsBootstrap, Usage }
+
 internal sealed class ClaudeConnectionWindow : Form
 {
     private const string UsageUrl = "https://claude.ai/settings/usage";
@@ -54,6 +56,7 @@ internal sealed class ClaudeConnectionWindow : Form
     private string? _documentFrame;
     private string? _documentLoader;
     private string? _documentUrl;
+    private ClaudeRefreshRoute _refreshRoute;
     private double _passiveAfter;
     private bool _disposed;
 
@@ -170,14 +173,7 @@ internal sealed class ClaudeConnectionWindow : Form
             {
                 pageAttempt.Loader = loader;
                 pageAttempt.Frame = frame;
-                if (_documentLoader == loader && _documentFrame == frame && IsLoginPage(_documentUrl) == true)
-                {
-                    _refresh.Fail(attempt, ClaudeRefreshResult.LoginRequired);
-                }
-                else
-                {
-                    Dispatch(pageAttempt);
-                }
+                InspectDocument(previousLoader: null);
             }
         }
         catch (Exception)
@@ -216,6 +212,11 @@ internal sealed class ClaudeConnectionWindow : Form
         }
 
         await _browser.EnsureCoreWebView2Async(environment);
+        await ObserveNavigationAsync();
+    }
+
+    private async Task ObserveNavigationAsync()
+    {
         if (_disposed == true || _refresh.State.Phase == ClaudeRefreshPhase.Stopped)
         {
             return;
@@ -284,6 +285,7 @@ internal sealed class ClaudeConnectionWindow : Form
         _documentFrame = ReadString(frame, "id");
         _documentLoader = ReadString(frame, "loaderId");
         _documentUrl = ReadString(frame, "url");
+        _refreshRoute = GetRefreshRoute(_documentUrl);
         InspectDocument(previousLoader);
     }
 
@@ -292,6 +294,13 @@ internal sealed class ClaudeConnectionWindow : Form
         if (_documentFrame != null && ReadString(item, "frameId") == _documentFrame)
         {
             _documentUrl = ReadString(item, "url");
+            ClaudeRefreshRoute route = GetRefreshRoute(_documentUrl);
+            _refreshRoute = _refreshRoute switch
+            {
+                ClaudeRefreshRoute.SettingsBootstrap => route,
+                ClaudeRefreshRoute.Usage when route == ClaudeRefreshRoute.Usage => route,
+                _ => ClaudeRefreshRoute.Other
+            };
             InspectDocument(_documentLoader);
         }
     }
@@ -299,28 +308,34 @@ internal sealed class ClaudeConnectionWindow : Form
     private void InspectDocument(string? previousLoader)
     {
         ClaudePageAttempt? pageAttempt = _pageAttempt;
-        if (pageAttempt?.Loader != null &&
-            ((pageAttempt.Loader == _documentLoader && pageAttempt.Frame == _documentFrame) || pageAttempt.Loader == previousLoader))
+        if (pageAttempt?.Loader != null)
         {
+            bool matches = pageAttempt.Loader == _documentLoader && pageAttempt.Frame == _documentFrame;
+            if (matches == false && pageAttempt.Loader != previousLoader)
+            {
+                return;
+            }
+
             if (IsLoginPage(_documentUrl) == true)
             {
                 _refresh.Fail(pageAttempt.Attempt, ClaudeRefreshResult.LoginRequired);
             }
-            else if (pageAttempt.Loader != _documentLoader || pageAttempt.Frame != _documentFrame || IsUsagePage(_documentUrl) == false)
+            else if (matches == true && CanUseDocument(pageAttempt) == true)
             {
+                Dispatch(pageAttempt);
+            }
+            else if (matches == false || _refreshRoute != ClaudeRefreshRoute.SettingsBootstrap ||
+                     pageAttempt.Attempt.Trigger == ClaudeRefreshTrigger.Page)
+            {
+                RetireLoader(pageAttempt.Loader);
                 if (Visible == true)
                 {
-                    RetireLoader(pageAttempt.Loader);
                     _refresh.Cancel(pageAttempt.Attempt);
                 }
                 else
                 {
                     _refresh.Fail(pageAttempt.Attempt, ClaudeRefreshResult.NavigationFailed);
                 }
-            }
-            else
-            {
-                Dispatch(pageAttempt);
             }
         }
         else if (pageAttempt == null && Visible == true && _pendingNavigations == 0 &&
@@ -420,7 +435,7 @@ internal sealed class ClaudeConnectionWindow : Form
 
         JsonElement response = item.GetProperty("response");
         int status = response.GetProperty("status").GetInt32();
-        if (status < 400 || IsUsagePage(ReadString(response, "url")) == false)
+        if (status < 400 || GetRefreshRoute(ReadString(response, "url")) == ClaudeRefreshRoute.Other)
         {
             return;
         }
@@ -477,6 +492,7 @@ internal sealed class ClaudeConnectionWindow : Form
     private void Dispatch(ClaudePageAttempt pageAttempt)
     {
         if (pageAttempt.Loader == null || pageAttempt.Loader != _documentLoader || pageAttempt.Frame != _documentFrame ||
+            CanUseDocument(pageAttempt) == false ||
             pageAttempt.Reading == true || _refresh.Accepts(pageAttempt.Attempt) == false)
         {
             return;
@@ -581,6 +597,20 @@ internal sealed class ClaudeConnectionWindow : Form
 
     private static bool IsUsagePage(string? url) => IsOfficial(url, out Uri uri) == true &&
         uri.AbsolutePath.TrimEnd('/') == "/settings/usage";
+
+    private static ClaudeRefreshRoute GetRefreshRoute(string? url)
+    {
+        if (IsUsagePage(url) == true)
+        {
+            return ClaudeRefreshRoute.Usage;
+        }
+
+        return IsOfficial(url, out Uri uri) == true && (uri.AbsolutePath is "/settings" or "/settings/") &&
+               uri.Query.Length == 0 ? ClaudeRefreshRoute.SettingsBootstrap : ClaudeRefreshRoute.Other;
+    }
+
+    private bool CanUseDocument(ClaudePageAttempt pageAttempt) => pageAttempt.Attempt.Trigger == ClaudeRefreshTrigger.Page ?
+        IsUsagePage(_documentUrl) : _refreshRoute == ClaudeRefreshRoute.Usage;
 
     private static bool IsUsageEndpoint(string? url) => IsOfficial(url, out Uri uri) == true &&
         uri.Segments is ["/", "api/", "organizations/", { Length: > 1 }, "usage"];

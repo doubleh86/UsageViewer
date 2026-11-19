@@ -1070,6 +1070,321 @@ internal static class PacingProbe
         Check(html.Contains("data-action=\"hide\"") && html.Contains("e.key==='Escape'") && html.Contains("id=\"show-both\"") && html.Contains("크레딧"), "existing controls retained");
     }
 
+    private static async Task CheckClaudeNavigationAsync()
+    {
+        const string origin = "https://claude.ai";
+        const string usage = "/settings/usage";
+        const string endpoint = "/api/organizations/fixture/usage";
+        TimeSpan limit = TimeSpan.FromSeconds(10);
+        var clock = new ClaudeFixtureClock();
+        string cachePath = Path.Combine(_root, "navigation-cache.json");
+        object store = New("Services.ClaudeUsageStore", cachePath);
+        object refresh = New("Services.ClaudeRefreshCoordinator", clock, null);
+        using Form window = (Form)New("UI.ClaudeConnectionWindow", store, refresh);
+        var browser = (WebView2)window.GetType().GetField("_browser", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(window)!;
+        var options = new CoreWebView2EnvironmentOptions("--disable-background-networking --no-first-run " +
+            "--no-proxy-server --host-resolver-rules=\"MAP * ~NOTFOUND\"");
+        string profile = Path.Combine(_root, "navigation-profile");
+        var environment = await CoreWebView2Environment.CreateAsync(null, profile, options)
+            .WaitAsync(TimeSpan.FromSeconds(30));
+        Check(string.Equals(environment.UserDataFolder, profile, StringComparison.OrdinalIgnoreCase),
+            "navigation fixture uses only its temporary profile");
+        var exited = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        environment.BrowserProcessExited += (_, _) => exited.TrySetResult(true);
+        _ = window.Handle;
+        _ = browser.Handle;
+        await browser.EnsureCoreWebView2Async(environment).WaitAsync(TimeSpan.FromSeconds(30));
+        CoreWebView2 core = browser.CoreWebView2;
+        string? redirect = null;
+        int documentStatus = 200;
+        int endpointStatus = 200;
+        int used = 0;
+        int replies = 0;
+        bool holdReply = false;
+        var requestPaused = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseReply = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All,
+                CoreWebView2WebResourceRequestSourceKinds.All);
+            core.WebResourceRequested += async (_, args) =>
+            {
+                int status = 404;
+                string headers = "Cache-Control: no-store\r\nContent-Type: text/html";
+                string body = "";
+                if (args.Request.Uri == origin + usage && redirect != null)
+                {
+                    status = 302;
+                    headers += "\r\nLocation: " + redirect;
+                }
+                else if (args.Request.Uri == origin + endpoint)
+                {
+                    status = endpointStatus;
+                    headers = "Cache-Control: no-store\r\nContent-Type: application/json";
+                    body = $$"""{"five_hour":{"utilization":{{used}}},"fixture_private":true}""";
+                    headers += status switch
+                    {
+                        302 => "\r\nLocation: /fixture-missing",
+                        429 or 503 => "\r\nRetry-After: 90",
+                        _ => ""
+                    };
+                    replies++;
+                }
+                else if (args.ResourceContext is CoreWebView2WebResourceContext.Document &&
+                         (args.Request.Uri.StartsWith(origin + "/", StringComparison.Ordinal) ||
+                          args.Request.Uri == "https://outside.invalid/settings/usage"))
+                {
+                    status = args.Request.Uri == origin + "/settings" ? documentStatus : 200;
+                    body = "<!doctype html><title>Synthetic navigation</title>";
+                }
+
+                CoreWebView2Deferral? deferral = null;
+                try
+                {
+                    if (holdReply && args.Request.Uri == origin + endpoint)
+                    {
+                        deferral = args.GetDeferral();
+                        requestPaused.TrySetResult(true);
+                        await releaseReply.Task;
+                    }
+
+                    args.Response = environment.CreateWebResourceResponse(new MemoryStream(System.Text.Encoding.UTF8.GetBytes(body)),
+                        status, "Synthetic", headers);
+                }
+                finally
+                {
+                    deferral?.Complete();
+                }
+            };
+            await ((Task)Invoke(window, "ObserveNavigationAsync")).WaitAsync(limit);
+
+            object State() => Get(refresh, "State")!;
+            string Result() => Get(State(), "Result")!.ToString()!;
+            bool Active() => Get(refresh, "Active") != null;
+
+            async Task Navigate(Func<Task> start, Uri expected, bool successful = true)
+            {
+                var navigated = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                EventHandler<CoreWebView2NavigationCompletedEventArgs> completed = (_, args) => navigated.TrySetResult(args.IsSuccess);
+                core.NavigationCompleted += completed;
+                try
+                {
+                    await start().WaitAsync(limit);
+                    Check(await navigated.Task.WaitAsync(limit) == successful && new Uri(core.Source) == expected,
+                        "WebView2 reaches expected synthetic document");
+                }
+                finally
+                {
+                    core.NavigationCompleted -= completed;
+                }
+            }
+
+            async Task<string> Evaluate(string script)
+            {
+                string result = await core.CallDevToolsProtocolMethodAsync("Runtime.evaluate",
+                    JsonSerializer.Serialize(new { expression = script, awaitPromise = true, returnByValue = true })).WaitAsync(limit);
+                using JsonDocument json = JsonDocument.Parse(result);
+                return json.RootElement.GetProperty("result").TryGetProperty("value", out JsonElement value) ? value.ToString() : "";
+            }
+
+            async Task AwaitAttemptEnd()
+            {
+                if (!Active())
+                {
+                    return;
+                }
+
+                var finished = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                EventHandler changed = (_, _) => { if (!Active()) { finished.TrySetResult(true); } };
+                EventInfo changedEvent = refresh.GetType().GetEvent("Changed")!;
+                changedEvent.AddEventHandler(refresh, changed);
+                try
+                {
+                    await finished.Task.WaitAsync(limit);
+                }
+                finally
+                {
+                    changedEvent.RemoveEventHandler(refresh, changed);
+                }
+            }
+
+            string request = $"const response=await fetch('{endpoint}');await response.text();return response.status;";
+            async Task Receive(bool changeRoute = false, string expectedStatus = "200", bool child = false)
+            {
+                int previousReplies = replies;
+                string route = changeRoute ? "history.replaceState(null,'','/settings/usage');" : "";
+                string fetch = "(async()=>{" + route + request + "})()";
+                string script = child ? "frames[0].eval(" + JsonSerializer.Serialize(fetch) + ")" : fetch;
+                string response = await Evaluate(script);
+                Check(response == expectedStatus && replies == previousReplies + 1, "synthetic page receives the expected response");
+                if (changeRoute)
+                {
+                    Check(new Uri(core.Source) == new Uri(origin + usage), "usage route reached in the same document");
+                }
+            }
+
+            Task StartRefresh(string trigger) => (Task)Invoke(window, "RefreshAsync", ClaudeEnum("Trigger", trigger));
+            Task Refresh() => StartRefresh(window.Visible ? "Connection" : "Manual");
+            Task NavigateTo(string target) => Navigate(() => { core.Navigate(target); return Task.CompletedTask; }, new Uri(target));
+            Task NavigateSettings() => Navigate(Refresh, new Uri(redirect = origin + "/settings"));
+
+            void CheckCacheUnchanged(string previous, string expectedResult)
+            {
+                Check(!Active() && Result() == expectedResult && File.ReadAllText(cachePath) == previous,
+                    "previous cache preserved with result " + expectedResult + " (actual: " + Result() + ")");
+            }
+
+            async Task<string> VerifyRefresh(int utilization, bool bootstrap, string trigger = "Manual")
+            {
+                string? previousCache = File.Exists(cachePath) ? File.ReadAllText(cachePath) : null;
+                clock.Advance(1);
+                used = utilization;
+                redirect = bootstrap ? origin + "/settings" : null;
+                await Navigate(() => StartRefresh(trigger), new Uri(redirect ?? origin + usage));
+                await Receive(changeRoute: bootstrap);
+                await AwaitAttemptEnd();
+                string saved = File.Exists(cachePath) ? File.ReadAllText(cachePath) : "";
+                Check(Result() == "Success" && saved != previousCache && saved.Contains($"\"UsedPercent\":{used}") &&
+                    !saved.Contains("fixture_private"), "new normalized cache and Success after " +
+                    (bootstrap ? "settings redirect (result: " + Result() + ")" : "ordinary navigation"));
+                return saved;
+            }
+
+            await VerifyRefresh(11, bootstrap: false);
+            await VerifyRefresh(22, bootstrap: false);
+            await Evaluate("location.hash='fixture'");
+            await VerifyRefresh(33, bootstrap: false);
+            string previousCache = await VerifyRefresh(44, bootstrap: true);
+
+            await NavigateSettings();
+            used = 99;
+            await Receive();
+            Check(Active() && File.ReadAllText(cachePath) == previousCache, "bootstrap is not itself a usage document");
+            await Evaluate("new Promise(resolve=>{const frame=document.createElement('iframe');" +
+                "frame.onload=resolve;frame.src='/settings/usage?child';document.body.append(frame);})");
+            await Receive(child: true);
+            Check(Active() && File.ReadAllText(cachePath) == previousCache, "child-frame 200 cannot complete bootstrap");
+            used = 55;
+            await Receive(changeRoute: true);
+            await AwaitAttemptEnd();
+            previousCache = File.ReadAllText(cachePath);
+            Check(Result() == "Success" && previousCache.Contains("\"UsedPercent\":55"),
+                "only the top-frame response is saved after the child-frame response");
+
+            await NavigateSettings();
+            clock.Advance(29);
+            Invoke(refresh, "Expire");
+            await Refresh();
+            Check(Active() && File.ReadAllText(cachePath) == previousCache, "bootstrap still pending at 29 seconds; duplicate refresh ignored");
+            clock.Advance(1);
+            Invoke(refresh, "Expire");
+            await Receive(changeRoute: true);
+            CheckCacheUnchanged(previousCache, "ResponseTimeout");
+            Check((DateTimeOffset?)Get(State(), "NextAttempt") == clock.GetUtcNow().AddSeconds(30), "timeout keeps normal backoff");
+
+            await NavigateSettings();
+            clock.Advance(29);
+            holdReply = true;
+            Task late = Receive(changeRoute: true);
+            await requestPaused.Task.WaitAsync(limit);
+            Check(Active(), "request started before the response deadline");
+            clock.Advance(1);
+            Invoke(refresh, "Expire");
+            releaseReply.SetResult(true);
+            await late;
+            holdReply = false;
+            CheckCacheUnchanged(previousCache, "ResponseTimeout");
+
+            await NavigateSettings();
+            await NavigateTo(origin + usage + "?different-loader");
+            await Receive();
+            await AwaitAttemptEnd();
+            CheckCacheUnchanged(previousCache, "NavigationFailed");
+
+            foreach (string other in new[] { origin + "/settings/organization", origin + "/settings?check=fixture",
+                         origin + "/cdn-cgi/challenge-platform/fixture", "https://outside.invalid/settings/usage" })
+            {
+                redirect = other;
+                await Navigate(Refresh, new Uri(other));
+                await AwaitAttemptEnd();
+                CheckCacheUnchanged(previousCache, "NavigationFailed");
+            }
+
+            previousCache = await VerifyRefresh(66, bootstrap: true);
+            window.Opacity = 0;
+            window.ShowInTaskbar = false;
+            window.Show();
+            await NavigateSettings();
+            await Evaluate("history.replaceState(null,'','/settings/usage');history.replaceState(null,'','/settings');");
+            await AwaitAttemptEnd();
+            CheckCacheUnchanged(previousCache, "Success");
+            await Receive(changeRoute: true);
+            CheckCacheUnchanged(previousCache, "Success");
+            await NavigateSettings();
+            await NavigateTo(origin + usage + "?user-navigation");
+            await AwaitAttemptEnd();
+            CheckCacheUnchanged(previousCache, "Success");
+            window.Hide();
+
+            endpointStatus = 302;
+            await NavigateSettings();
+            await Receive(changeRoute: true, expectedStatus: "404");
+            await AwaitAttemptEnd();
+            CheckCacheUnchanged(previousCache, "NetworkFailed");
+            Check((DateTimeOffset?)Get(State(), "NextAttempt") == clock.GetUtcNow().AddSeconds(30), "network failure keeps retry backoff");
+            endpointStatus = 200;
+            clock.Advance(29);
+            await StartRefresh("Automatic");
+            CheckCacheUnchanged(previousCache, "NetworkFailed");
+            previousCache = await VerifyRefresh(77, bootstrap: true, trigger: "Automatic");
+
+            foreach ((int status, string result) in new[] { (503, "ServerError"), (429, "RateLimited"), (403, "AccessRequired") })
+            {
+                endpointStatus = status;
+                await NavigateSettings();
+                await Receive(changeRoute: true, expectedStatus: status.ToString());
+                await AwaitAttemptEnd();
+                CheckCacheUnchanged(previousCache, result);
+                if (status is 429 or 503)
+                {
+                    Check((DateTimeOffset?)Get(State(), "ServerNotBefore") == clock.GetUtcNow().AddSeconds(90), "server wait retained");
+                    await Refresh();
+                    Check(!Active(), "server wait blocks manual navigation");
+                    clock.Advance(90);
+                }
+            }
+
+            window.Show();
+            documentStatus = 403;
+            await Navigate(Refresh, new Uri(redirect = origin + "/settings"), successful: false);
+            await AwaitAttemptEnd();
+            CheckCacheUnchanged(previousCache, "AccessRequired");
+            documentStatus = 200;
+            redirect = origin + "/login";
+            await Navigate(Refresh, new Uri(redirect));
+            await AwaitAttemptEnd();
+            CheckCacheUnchanged(previousCache, "LoginRequired");
+            await NavigateTo(origin + "/fixture-idle");
+
+            endpointStatus = 200;
+            await NavigateSettings();
+            Check(Active(), "shutdown occurs during a pending bootstrap");
+            Invoke(refresh, "Stop");
+            await Receive(changeRoute: true);
+            CheckCacheUnchanged(previousCache, "LoginRequired");
+            Check(Get(State(), "Phase")!.ToString() == "Stopped", "shutdown ignores the late response");
+            Console.WriteLine("PASS: actual WebView2 Claude navigation fixture; intercepted requests, isolated profile.");
+        }
+        finally
+        {
+            releaseReply.TrySetResult(true);
+            Invoke(refresh, "Stop");
+            window.Dispose();
+            await exited.Task.WaitAsync(limit);
+        }
+    }
+
     private static void CheckRendering()
     {
         NativeLibrary.SetDllImportResolver(typeof(CoreWebView2Environment).Assembly, (name, assembly, search) =>
@@ -1093,6 +1408,7 @@ internal static class PacingProbe
             TaskCompletionSource<bool>? browserExited = null;
             try
             {
+                await CheckClaudeNavigationAsync();
                 var options = new CoreWebView2EnvironmentOptions("--disable-background-networking --no-first-run");
                 var environment = await CoreWebView2Environment.CreateAsync(null,
                     Path.Combine(_root, "render-profile"), options).WaitAsync(TimeSpan.FromSeconds(30));

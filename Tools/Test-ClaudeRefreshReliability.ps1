@@ -30,6 +30,13 @@ check(/InitializationTimeout = TimeSpan.FromSeconds\(60\)/.test(policy) && /Atte
 check(connection.includes('"Page.navigate"') && connection.includes('"Network.requestWillBeSent"') && connection.includes('"Network.loadingFinished"') &&
     connection.includes('item.Loader == Loader && item.Frame == Frame') && connection.includes('request.Url') &&
     connection.includes('sentAt.TryGetDouble'), 'loader, frame, request, provider and passive request-start correlation');
+check(connection.includes('uri.AbsolutePath is "/settings" or "/settings/"') && connection.includes('uri.Query.Length == 0') &&
+    /bool matches = pageAttempt.Loader == _documentLoader && pageAttempt.Frame == _documentFrame/.test(connection) &&
+    /matches == false \|\| _refreshRoute != ClaudeRefreshRoute.SettingsBootstrap \|\|\s*pageAttempt.Attempt.Trigger == ClaudeRefreshTrigger.Page/.test(connection),
+    'only the bound explicit attempt waits on the exact settings bootstrap');
+const dispatch = block(connection, 'private void Dispatch', 'private async Task ReadAndSaveAsync');
+check(dispatch.includes('CanUseDocument(pageAttempt) == false') && dispatch.includes('_refresh.Accepts(pageAttempt.Attempt) == false') &&
+    dispatch.includes('request.Status == 200 && request.Finished == true'), 'bootstrap waits without treating the document or an incomplete response as success');
 check(/if \(_refresh.Accepts\(attempt\) == false\)[\s\S]*RetireLoader\(loader\)/.test(connection) &&
     tray.indexOf('_claudeRefresh.Stop();') < tray.indexOf('_shutdown.Cancel();'), 'late callbacks and shutdown guarded');
 check(/replaceFile\(\);\s+Finish\(ClaudeRefreshResult.Success/.test(coordinator) &&
