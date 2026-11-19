@@ -1319,7 +1319,10 @@ internal static class PacingProbe
             await VerifyRefresh(33, bootstrap: false);
             string previousCache = await VerifyRefresh(44, bootstrap: true);
 
-            foreach (string trigger in new[] { "Manual", "Automatic" })
+            foreach ((string trigger, string path) in new[]
+            {
+                ("Manual", "/new"), ("Automatic", "/new"), ("Manual", "/new#fixture")
+            })
             {
                 clock.Advance(60);
                 int firstUsed = ++used;
@@ -1328,22 +1331,25 @@ internal static class PacingProbe
                 Task<string> pending = await HoldUsageReply();
                 object binding = WindowField("_pageAttempt")!;
                 Check(Invoke(binding, "SelectRequest") != null, "official GET registered before leaving the usage route");
-                await SameDocument("/new");
+                await SameDocument(path);
                 used = 99;
                 await Receive();
                 used = firstUsed;
-                Check(Active() && ((IList)Get(binding, "Requests")!).Count == 1 && File.ReadAllText(cachePath) == previousCache,
-                    "a new GET on /new does not join the frozen set or replace the cache");
+                bool keptOriginal = Active() && ((IList)Get(binding, "Requests")!).Count == 1 &&
+                    File.ReadAllText(cachePath) == previousCache;
                 releaseReply.SetResult(true);
                 Check(await pending == "200", "original GET receives 200 after the route change");
                 await AwaitAttemptEnd();
                 string saved = File.ReadAllText(cachePath);
                 Check(Result() == "Success" && successes == before + 1 && saved != previousCache && saved.Contains($"\"UsedPercent\":{used}") &&
-                    !saved.Contains("fixture_private"), "original GET saves normalized cache after /new (actual: " + Result() + ")");
+                    !saved.Contains("fixture_private"), $"original GET saves normalized cache after {path} " +
+                    $"(actual: {Result()}, cache unchanged: {saved == previousCache})");
+                Check(keptOriginal, "a new GET after the route change does not join the frozen set or replace the cache");
                 previousCache = saved;
             }
 
-            foreach (string path in new[] { "/new", "/new?fixture", "/new?", "/new#fixture", "/new/", "/settings/organization" })
+            foreach (string path in new[] { "/new", "/new?fixture", "/new?", "/new?fixture#fixture", "/new?#fixture",
+                "/new/", "/new/#fixture", "/settings/organization" })
             {
                 await NavigateUsage();
                 Task<string>? pending = path == "/new" ? null : await HoldUsageReply();

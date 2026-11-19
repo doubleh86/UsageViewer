@@ -43,7 +43,6 @@ internal enum ClaudeRefreshRoute { Other, SettingsBootstrap, Usage }
 internal sealed class ClaudeConnectionWindow : Form
 {
     private const string UsageUrl = "https://claude.ai/settings/usage";
-    private const string NewUrl = "https://claude.ai/new";
     private readonly WebView2 _browser = new WebView2 { Dock = DockStyle.Fill };
     private readonly Label _status;
     private readonly ClaudeWebUsageParser _parser = new ClaudeWebUsageParser();
@@ -298,7 +297,7 @@ internal sealed class ClaudeConnectionWindow : Form
         if (_documentFrame != null && ReadString(item, "frameId") == _documentFrame)
         {
             string? url = ReadString(item, "url");
-            if (url == NewUrl && _refreshRoute == ClaudeRefreshRoute.Usage && _documentUrl == UsageUrl &&
+            if (IsNewPage(url) == true && _refreshRoute == ClaudeRefreshRoute.Usage && _documentUrl == UsageUrl &&
                 _pageAttempt is ClaudePageAttempt pageAttempt)
             {
                 FreezeInflightRequests(pageAttempt);
@@ -632,6 +631,9 @@ internal sealed class ClaudeConnectionWindow : Form
     private static bool IsUsagePage(string? url) => IsOfficial(url, out Uri uri) == true &&
         uri.AbsolutePath.TrimEnd('/') == "/settings/usage";
 
+    private static bool IsNewPage(string? url) => IsOfficial(url, out Uri uri) == true &&
+        uri.AbsolutePath == "/new" && uri.Query.Length == 0;
+
     private static ClaudeRefreshRoute GetRefreshRoute(string? url)
     {
         if (IsUsagePage(url) == true)
@@ -644,7 +646,7 @@ internal sealed class ClaudeConnectionWindow : Form
     }
 
     private bool CanUseDocument(ClaudePageAttempt pageAttempt) => pageAttempt.Draining == true ?
-        Visible == false && _documentUrl == NewUrl : pageAttempt.Attempt.Trigger == ClaudeRefreshTrigger.Page ?
+        Visible == false && IsNewPage(_documentUrl) == true : pageAttempt.Attempt.Trigger == ClaudeRefreshTrigger.Page ?
         IsUsagePage(_documentUrl) : _refreshRoute == ClaudeRefreshRoute.Usage;
 
     private static bool IsUsageEndpoint(string? url) => IsOfficial(url, out Uri uri) == true &&
