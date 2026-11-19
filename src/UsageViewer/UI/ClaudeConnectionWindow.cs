@@ -13,6 +13,7 @@ internal sealed class ClaudePageRequest(string id, string loader, string frame, 
     public string Loader { get; } = loader;
     public string Frame { get; } = frame;
     public string Url { get; } = url;
+    public string? DocumentUrl { get; init; }
     public int? Status { get; set; }
     public DateTimeOffset? RetryAfter { get; set; }
     public DateTimeOffset ReceivedAt { get; set; }
@@ -29,6 +30,7 @@ internal sealed class ClaudePageAttempt(ClaudeRefreshAttempt attempt)
     public List<ClaudePageRequest> Requests { get; } = [];
     public List<ClaudeDocumentFailure> DocumentFailures { get; } = [];
     public bool Reading { get; set; }
+    public bool Draining { get; set; }
 
     public ClaudePageRequest? SelectRequest() => Loader == null ? null :
         Requests.Find(item => item.Loader == Loader && item.Frame == Frame);
@@ -41,6 +43,7 @@ internal enum ClaudeRefreshRoute { Other, SettingsBootstrap, Usage }
 internal sealed class ClaudeConnectionWindow : Form
 {
     private const string UsageUrl = "https://claude.ai/settings/usage";
+    private const string NewUrl = "https://claude.ai/new";
     private readonly WebView2 _browser = new WebView2 { Dock = DockStyle.Fill };
     private readonly Label _status;
     private readonly ClaudeWebUsageParser _parser = new ClaudeWebUsageParser();
@@ -257,7 +260,8 @@ internal sealed class ClaudeConnectionWindow : Form
         _receivers.Add(receiver);
         receiver.DevToolsProtocolEventReceived += (_, args) =>
         {
-            if (_disposed == true || _refresh.State.Phase == ClaudeRefreshPhase.Stopped)
+            if (_disposed == true || _refresh.State.Phase == ClaudeRefreshPhase.Stopped ||
+                string.IsNullOrEmpty(args.SessionId) == false)
             {
                 return;
             }
@@ -286,14 +290,21 @@ internal sealed class ClaudeConnectionWindow : Form
         _documentLoader = ReadString(frame, "loaderId");
         _documentUrl = ReadString(frame, "url");
         _refreshRoute = GetRefreshRoute(_documentUrl);
-        InspectDocument(previousLoader);
+        InspectDocument(previousLoader, newDocument: true);
     }
 
     private void OnWithinDocument(JsonElement item)
     {
         if (_documentFrame != null && ReadString(item, "frameId") == _documentFrame)
         {
-            _documentUrl = ReadString(item, "url");
+            string? url = ReadString(item, "url");
+            if (url == NewUrl && _refreshRoute == ClaudeRefreshRoute.Usage && _documentUrl == UsageUrl &&
+                _pageAttempt is ClaudePageAttempt pageAttempt)
+            {
+                FreezeInflightRequests(pageAttempt);
+            }
+
+            _documentUrl = url;
             ClaudeRefreshRoute route = GetRefreshRoute(_documentUrl);
             _refreshRoute = _refreshRoute switch
             {
@@ -305,7 +316,29 @@ internal sealed class ClaudeConnectionWindow : Form
         }
     }
 
-    private void InspectDocument(string? previousLoader)
+    private void FreezeInflightRequests(ClaudePageAttempt pageAttempt)
+    {
+        if (Visible == true || pageAttempt.Attempt.Trigger is not (ClaudeRefreshTrigger.Automatic or ClaudeRefreshTrigger.Manual) ||
+            pageAttempt.Loader == null || pageAttempt.Loader != _documentLoader || pageAttempt.Frame != _documentFrame ||
+            _refresh.Accepts(pageAttempt.Attempt) == false)
+        {
+            return;
+        }
+
+        bool IsCandidate(ClaudePageRequest request) => request.Loader == pageAttempt.Loader && request.Frame == pageAttempt.Frame &&
+            request.DocumentUrl == UsageUrl && Uri.TryCreate(request.Url, UriKind.Absolute, out Uri? uri) == true &&
+            uri.Query.Length == 0 && uri.Fragment.Length == 0;
+
+        if (pageAttempt.Reading == true && pageAttempt.SelectRequest() is ClaudePageRequest selected && IsCandidate(selected) == false)
+        {
+            return;
+        }
+
+        pageAttempt.Requests.RemoveAll(request => IsCandidate(request) == false);
+        pageAttempt.Draining = pageAttempt.Requests.Count > 0;
+    }
+
+    private void InspectDocument(string? previousLoader, bool newDocument = false)
     {
         ClaudePageAttempt? pageAttempt = _pageAttempt;
         if (pageAttempt?.Loader != null)
@@ -320,11 +353,11 @@ internal sealed class ClaudeConnectionWindow : Form
             {
                 _refresh.Fail(pageAttempt.Attempt, ClaudeRefreshResult.LoginRequired);
             }
-            else if (matches == true && CanUseDocument(pageAttempt) == true)
+            else if (matches == true && (newDocument == false || pageAttempt.Draining == false) && CanUseDocument(pageAttempt) == true)
             {
                 Dispatch(pageAttempt);
             }
-            else if (matches == false || _refreshRoute != ClaudeRefreshRoute.SettingsBootstrap ||
+            else if (matches == false || _refreshRoute != ClaudeRefreshRoute.SettingsBootstrap || pageAttempt.Draining == true ||
                      pageAttempt.Attempt.Trigger == ClaudeRefreshTrigger.Page)
             {
                 RetireLoader(pageAttempt.Loader);
@@ -362,10 +395,11 @@ internal sealed class ClaudeConnectionWindow : Form
 
         JsonElement request = item.GetProperty("request");
         string? url = ReadString(request, "url");
+        string? documentUrl = ReadString(item, "documentURL");
         string? loader = ReadString(item, "loaderId");
         string? frame = ReadString(item, "frameId");
         if (id == null || string.IsNullOrEmpty(loader) == true || frame == null || IsUsageEndpoint(url) == false ||
-            ReadString(request, "method") != "GET" || IsUsagePage(ReadString(item, "documentURL")) == false ||
+            ReadString(request, "method") != "GET" || IsUsagePage(documentUrl) == false ||
             item.TryGetProperty("redirectResponse", out _) == true)
         {
             return;
@@ -384,11 +418,11 @@ internal sealed class ClaudeConnectionWindow : Form
             }
         }
 
-        if (_pageAttempt is ClaudePageAttempt pageAttempt && pageAttempt.Reading == false &&
+        if (_pageAttempt is ClaudePageAttempt pageAttempt && pageAttempt.Draining == false && pageAttempt.Reading == false &&
             _refresh.Accepts(pageAttempt.Attempt) == true && pageAttempt.Requests.Count < 16 &&
             (pageAttempt.Loader == null || (pageAttempt.Loader == loader && pageAttempt.Frame == frame)))
         {
-            pageAttempt.Requests.Add(new ClaudePageRequest(id, loader, frame, url!));
+            pageAttempt.Requests.Add(new ClaudePageRequest(id, loader, frame, url!) { DocumentUrl = documentUrl });
         }
     }
 
@@ -609,7 +643,8 @@ internal sealed class ClaudeConnectionWindow : Form
                uri.Query.Length == 0 ? ClaudeRefreshRoute.SettingsBootstrap : ClaudeRefreshRoute.Other;
     }
 
-    private bool CanUseDocument(ClaudePageAttempt pageAttempt) => pageAttempt.Attempt.Trigger == ClaudeRefreshTrigger.Page ?
+    private bool CanUseDocument(ClaudePageAttempt pageAttempt) => pageAttempt.Draining == true ?
+        Visible == false && _documentUrl == NewUrl : pageAttempt.Attempt.Trigger == ClaudeRefreshTrigger.Page ?
         IsUsagePage(_documentUrl) : _refreshRoute == ClaudeRefreshRoute.Usage;
 
     private static bool IsUsageEndpoint(string? url) => IsOfficial(url, out Uri uri) == true &&
@@ -658,10 +693,11 @@ internal sealed class ClaudeConnectionWindow : Form
         if (e.CloseReason == CloseReason.UserClosing)
         {
             e.Cancel = true;
-            if (_refresh.Active is { Trigger: ClaudeRefreshTrigger.Page } passive)
+            if (_refresh.Active is ClaudeRefreshAttempt attempt &&
+                (attempt.Trigger == ClaudeRefreshTrigger.Page || _pageAttempt?.Draining == true))
             {
                 RetireLoader(_pageAttempt?.Loader);
-                _refresh.Cancel(passive);
+                _refresh.Cancel(attempt);
             }
 
             Hide();
@@ -670,11 +706,31 @@ internal sealed class ClaudeConnectionWindow : Form
         base.OnFormClosing(e);
     }
 
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        if (Visible == true)
+        {
+            CancelInflight();
+        }
+
+        base.OnVisibleChanged(e);
+    }
+
+    private void CancelInflight()
+    {
+        if (_pageAttempt is { Draining: true } pageAttempt)
+        {
+            RetireLoader(pageAttempt.Loader);
+            _refresh.Cancel(pageAttempt.Attempt);
+        }
+    }
+
     protected override void Dispose(bool disposing)
     {
         _disposed = true;
         if (disposing == true)
         {
+            CancelInflight();
             _refresh.Changed -= OnRefreshChanged;
             _browser.Dispose();
         }

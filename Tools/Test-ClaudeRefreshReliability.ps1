@@ -32,8 +32,20 @@ check(connection.includes('"Page.navigate"') && connection.includes('"Network.re
     connection.includes('sentAt.TryGetDouble'), 'loader, frame, request, provider and passive request-start correlation');
 check(connection.includes('uri.AbsolutePath is "/settings" or "/settings/"') && connection.includes('uri.Query.Length == 0') &&
     /bool matches = pageAttempt.Loader == _documentLoader && pageAttempt.Frame == _documentFrame/.test(connection) &&
-    /matches == false \|\| _refreshRoute != ClaudeRefreshRoute.SettingsBootstrap \|\|\s*pageAttempt.Attempt.Trigger == ClaudeRefreshTrigger.Page/.test(connection),
+    /matches == false \|\| _refreshRoute != ClaudeRefreshRoute.SettingsBootstrap \|\| pageAttempt.Draining == true \|\|\s*pageAttempt.Attempt.Trigger == ClaudeRefreshTrigger.Page/.test(connection),
     'only the bound explicit attempt waits on the exact settings bootstrap');
+const routeChange = block(connection, 'private void OnWithinDocument', 'private void InspectDocument');
+const requestEvent = block(connection, 'private void OnRequest', 'private void OnResponse');
+check(connection.includes('NewUrl = "https://claude.ai/new"') && routeChange.includes('url == NewUrl') &&
+    routeChange.includes('_documentUrl == UsageUrl') && routeChange.includes('_documentFrame') &&
+    routeChange.includes('Visible == true') && routeChange.includes('ClaudeRefreshTrigger.Automatic or ClaudeRefreshTrigger.Manual') &&
+    routeChange.includes('_refresh.Accepts(pageAttempt.Attempt)'), 'only hidden app attempts can recover from the exact same-document move');
+check(routeChange.includes('request.DocumentUrl == UsageUrl') && routeChange.includes('uri.Query.Length == 0') &&
+    routeChange.includes('Requests.RemoveAll') && routeChange.includes('Requests.Count > 0') &&
+    requestEvent.includes('pageAttempt.Draining == false') && requestEvent.includes('!= "GET"') &&
+    connection.includes('string.IsNullOrEmpty(args.SessionId) == false'), 'only pre-registered top-session GET candidates are frozen');
+check(connection.includes('newDocument: true') && connection.includes('Visible == false && _documentUrl == NewUrl') &&
+    connection.includes('CancelInflight();'), 'draining cannot continue after a new document or user interaction');
 const dispatch = block(connection, 'private void Dispatch', 'private async Task ReadAndSaveAsync');
 check(dispatch.includes('CanUseDocument(pageAttempt) == false') && dispatch.includes('_refresh.Accepts(pageAttempt.Attempt) == false') &&
     dispatch.includes('request.Status == 200 && request.Finished == true'), 'bootstrap waits without treating the document or an incomplete response as success');

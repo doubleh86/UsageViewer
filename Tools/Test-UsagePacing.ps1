@@ -1081,6 +1081,8 @@ internal static class PacingProbe
         object store = New("Services.ClaudeUsageStore", cachePath);
         object refresh = New("Services.ClaudeRefreshCoordinator", clock, null);
         using Form window = (Form)New("UI.ClaudeConnectionWindow", store, refresh);
+        window.Opacity = 0;
+        window.ShowInTaskbar = false;
         var browser = (WebView2)window.GetType().GetField("_browser", BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(window)!;
         var options = new CoreWebView2EnvironmentOptions("--disable-background-networking --no-first-run " +
@@ -1099,9 +1101,10 @@ internal static class PacingProbe
         string? redirect = null;
         int documentStatus = 200;
         int endpointStatus = 200;
+        string? endpointBody = null;
         int used = 0;
         int replies = 0;
-        bool holdReply = false;
+        string? heldUrl = null;
         var requestPaused = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseReply = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         try
@@ -1118,11 +1121,13 @@ internal static class PacingProbe
                     status = 302;
                     headers += "\r\nLocation: " + redirect;
                 }
-                else if (args.Request.Uri == origin + endpoint)
+                else if (args.Request.Uri is "https://outside.invalid/api/organizations/fixture/usage" ||
+                         args.Request.Uri == origin + endpoint || args.Request.Uri == origin + endpoint + "?fixture" ||
+                         args.Request.Uri == origin + endpoint + "/other")
                 {
                     status = endpointStatus;
-                    headers = "Cache-Control: no-store\r\nContent-Type: application/json";
-                    body = $$"""{"five_hour":{"utilization":{{used}}},"fixture_private":true}""";
+                    headers = "Cache-Control: no-store\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: " + origin;
+                    body = endpointBody ?? $$"""{"five_hour":{"utilization":{{used}}},"fixture_private":true}""";
                     headers += status switch
                     {
                         302 => "\r\nLocation: /fixture-missing",
@@ -1142,7 +1147,7 @@ internal static class PacingProbe
                 CoreWebView2Deferral? deferral = null;
                 try
                 {
-                    if (holdReply && args.Request.Uri == origin + endpoint)
+                    if (args.Request.Uri == heldUrl)
                     {
                         deferral = args.GetDeferral();
                         requestPaused.TrySetResult(true);
@@ -1162,6 +1167,15 @@ internal static class PacingProbe
             object State() => Get(refresh, "State")!;
             string Result() => Get(State(), "Result")!.ToString()!;
             bool Active() => Get(refresh, "Active") != null;
+            int successes = 0;
+            EventInfo changedEvent = refresh.GetType().GetEvent("Changed")!;
+            changedEvent.AddEventHandler(refresh, (EventHandler)((_, _) =>
+            {
+                if (!Active() && Result() == "Success")
+                {
+                    successes++;
+                }
+            }));
 
             async Task Navigate(Func<Task> start, Uri expected, bool successful = true)
             {
@@ -1197,7 +1211,6 @@ internal static class PacingProbe
 
                 var finished = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 EventHandler changed = (_, _) => { if (!Active()) { finished.TrySetResult(true); } };
-                EventInfo changedEvent = refresh.GetType().GetEvent("Changed")!;
                 changedEvent.AddEventHandler(refresh, changed);
                 try
                 {
@@ -1228,11 +1241,16 @@ internal static class PacingProbe
             Task Refresh() => StartRefresh(window.Visible ? "Connection" : "Manual");
             Task NavigateTo(string target) => Navigate(() => { core.Navigate(target); return Task.CompletedTask; }, new Uri(target));
             Task NavigateSettings() => Navigate(Refresh, new Uri(redirect = origin + "/settings"));
+            Task NavigateUsage(string trigger = "Manual")
+            {
+                redirect = null;
+                return Navigate(() => StartRefresh(trigger), new Uri(origin + usage));
+            }
 
-            void CheckCacheUnchanged(string previous, string expectedResult)
+            void CheckCacheUnchanged(string previous, string expectedResult, string context = "")
             {
                 Check(!Active() && Result() == expectedResult && File.ReadAllText(cachePath) == previous,
-                    "previous cache preserved with result " + expectedResult + " (actual: " + Result() + ")");
+                    "previous cache preserved with result " + expectedResult + " (actual: " + Result() + ") " + context);
             }
 
             async Task<string> VerifyRefresh(int utilization, bool bootstrap, string trigger = "Manual")
@@ -1251,11 +1269,197 @@ internal static class PacingProbe
                 return saved;
             }
 
+            object? WindowField(string name) => window.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(window);
+
+            async Task SameDocument(string path)
+            {
+                object? loader = WindowField("_documentLoader");
+                object? frame = WindowField("_documentFrame");
+                var routed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var receiver = core.GetDevToolsProtocolEventReceiver("Page.navigatedWithinDocument");
+                EventHandler<CoreWebView2DevToolsProtocolEventReceivedEventArgs> received = (_, args) =>
+                {
+                    using JsonDocument json = JsonDocument.Parse(args.ParameterObjectAsJson);
+                    if (json.RootElement.GetProperty("url").GetString() == origin + path)
+                    {
+                        routed.TrySetResult(true);
+                    }
+                };
+                receiver.DevToolsProtocolEventReceived += received;
+                try
+                {
+                    await Evaluate("history.replaceState(null,''," + JsonSerializer.Serialize(path) + ")");
+                    await routed.Task.WaitAsync(limit);
+                    Check(loader != null && Equals(loader, WindowField("_documentLoader")) &&
+                        frame != null && Equals(frame, WindowField("_documentFrame")) &&
+                        Equals(origin + path, WindowField("_documentUrl")), "route changed without replacing the main document");
+                }
+                finally
+                {
+                    receiver.DevToolsProtocolEventReceived -= received;
+                }
+            }
+
+            async Task<Task<string>> HoldUsageReply(bool detach = false, string? url = null)
+            {
+                requestPaused = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                releaseReply = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                heldUrl = url ?? origin + endpoint;
+                string fetch = "(async()=>{" + request.Replace(endpoint, heldUrl) + "})()";
+                Task<string> pending = Evaluate(detach ? fetch + ".catch(()=>{});true" : fetch);
+                await requestPaused.Task.WaitAsync(limit);
+                heldUrl = null;
+                return pending;
+            }
+
             await VerifyRefresh(11, bootstrap: false);
             await VerifyRefresh(22, bootstrap: false);
             await Evaluate("location.hash='fixture'");
             await VerifyRefresh(33, bootstrap: false);
             string previousCache = await VerifyRefresh(44, bootstrap: true);
+
+            foreach (string trigger in new[] { "Manual", "Automatic" })
+            {
+                clock.Advance(60);
+                int firstUsed = ++used;
+                int before = successes;
+                await NavigateUsage(trigger);
+                Task<string> pending = await HoldUsageReply();
+                object binding = WindowField("_pageAttempt")!;
+                Check(Invoke(binding, "SelectRequest") != null, "official GET registered before leaving the usage route");
+                await SameDocument("/new");
+                used = 99;
+                await Receive();
+                used = firstUsed;
+                Check(Active() && ((IList)Get(binding, "Requests")!).Count == 1 && File.ReadAllText(cachePath) == previousCache,
+                    "a new GET on /new does not join the frozen set or replace the cache");
+                releaseReply.SetResult(true);
+                Check(await pending == "200", "original GET receives 200 after the route change");
+                await AwaitAttemptEnd();
+                string saved = File.ReadAllText(cachePath);
+                Check(Result() == "Success" && successes == before + 1 && saved != previousCache && saved.Contains($"\"UsedPercent\":{used}") &&
+                    !saved.Contains("fixture_private"), "original GET saves normalized cache after /new (actual: " + Result() + ")");
+                previousCache = saved;
+            }
+
+            foreach (string path in new[] { "/new", "/new?fixture", "/new?", "/new#fixture", "/new/", "/settings/organization" })
+            {
+                await NavigateUsage();
+                Task<string>? pending = path == "/new" ? null : await HoldUsageReply();
+                await SameDocument(path);
+                await AwaitAttemptEnd();
+                releaseReply.TrySetResult(true);
+                if (pending != null) { Check(await pending == "200", "ineligible route receives the delayed 200"); }
+                else { await Receive(); }
+                CheckCacheUnchanged(previousCache, "NavigationFailed", path);
+            }
+
+            foreach (string url in new[] { origin + endpoint + "?fixture", origin + endpoint + "/other", "https://outside.invalid" + endpoint })
+            {
+                await NavigateUsage();
+                Task<string> ineligibleReply = await HoldUsageReply(url: url);
+                await SameDocument("/new");
+                releaseReply.SetResult(true);
+                Check(await ineligibleReply == "200", "ineligible endpoint returns a 200 but cannot recover");
+                CheckCacheUnchanged(previousCache, "NavigationFailed");
+            }
+
+            await NavigateUsage();
+            await Evaluate("new Promise(resolve=>{const frame=document.createElement('iframe');" +
+                "frame.onload=resolve;frame.src='/settings/usage';document.body.append(frame);})");
+            await Receive(child: true);
+            await SameDocument("/new");
+            CheckCacheUnchanged(previousCache, "NavigationFailed");
+
+            foreach (string exit in new[] { "/settings", usage, "new-document", "timeout", "show", "close" })
+            {
+                await NavigateUsage();
+                Task<string> pending = await HoldUsageReply(detach: exit == "new-document");
+                await SameDocument("/new");
+                Check(Active(), "attempt waits for the original GET on /new");
+                string expected = "NavigationFailed";
+                switch (exit)
+                {
+                    case "new-document":
+                        object? previousLoader = WindowField("_documentLoader");
+                        await NavigateTo(origin + "/new");
+                        Check(!Equals(previousLoader, WindowField("_documentLoader")), "new document changes the loader on the same URL");
+                        expected = Result() == "NetworkFailed" ? "NetworkFailed" : "NavigationFailed";
+                        break;
+                    case "timeout": clock.Advance(30); Invoke(refresh, "Expire"); expected = "ResponseTimeout"; break;
+                    case "show": window.Show(); window.Hide(); expected = "ResponseTimeout"; break;
+                    case "close": window.Close(); expected = "ResponseTimeout"; break;
+                    default: await SameDocument(exit); break;
+                }
+                await AwaitAttemptEnd();
+                releaseReply.SetResult(true);
+                Check(await pending == (exit == "new-document" ? "True" : "200"), "late response cannot revive the attempt");
+                CheckCacheUnchanged(previousCache, expected, exit);
+            }
+
+            foreach (string invalid in new[] { "fromDiskCache", "fromServiceWorker", "fromPrefetchCache", "url", "loader", "frame" })
+            {
+                await NavigateUsage();
+                Task<string> pending = await HoldUsageReply();
+                object selected = Invoke(WindowField("_pageAttempt")!, "SelectRequest");
+                await SameDocument("/new");
+                var response = new System.Collections.Generic.Dictionary<string, object>
+                {
+                    ["url"] = origin + endpoint + (invalid == "url" ? "?other" : ""),
+                    ["status"] = 200
+                };
+                if (invalid.StartsWith("from", StringComparison.Ordinal)) { response[invalid] = true; }
+                using var observed = JsonDocument.Parse(JsonSerializer.Serialize(new
+                {
+                    requestId = Get(selected, "Id"),
+                    loaderId = invalid == "loader" ? "foreign-loader" : Get(selected, "Loader"),
+                    frameId = invalid == "frame" ? "foreign-frame" : Get(selected, "Frame"),
+                    response
+                }));
+                Invoke(window, "OnResponse", observed.RootElement);
+                releaseReply.SetResult(true);
+                Check(await pending == "200", "a later browser 200 cannot rescue a rejected candidate");
+                CheckCacheUnchanged(previousCache, "NetworkFailed", invalid);
+            }
+
+            foreach ((int status, string result) in new[] { (503, "ServerError"), (429, "RateLimited"),
+                         (302, "NetworkFailed"), (200, "ResponseFormat"), (200, "ResponseRange"),
+                         (403, "AccessRequired"), (401, "LoginRequired") })
+            {
+                endpointStatus = status;
+                endpointBody = result switch { "ResponseFormat" => "{bad", "ResponseRange" => new string(' ', 65537), _ => null };
+                await NavigateUsage();
+                Task<string> pending = await HoldUsageReply();
+                await SameDocument("/new");
+                releaseReply.SetResult(true);
+                Check(await pending == (status == 302 ? "404" : status.ToString()), "frozen GET receives the synthetic error response");
+                await AwaitAttemptEnd();
+                CheckCacheUnchanged(previousCache, result);
+                if (status is 429 or 503)
+                {
+                    Check((DateTimeOffset?)Get(State(), "ServerNotBefore") == clock.GetUtcNow().AddSeconds(90), "frozen request keeps server backoff");
+                    clock.Advance(90);
+                }
+                if (status is 401 or 403 || status == 200)
+                {
+                    window.Show();
+                    endpointStatus = 200;
+                    endpointBody = null;
+                    previousCache = await VerifyRefresh(++used, bootstrap: false, trigger: "Connection");
+                    window.Hide();
+                }
+            }
+
+            window.Show();
+            await NavigateUsage("Connection");
+            Task<string> visibleReply = await HoldUsageReply();
+            await SameDocument("/new");
+            await AwaitAttemptEnd();
+            releaseReply.SetResult(true);
+            Check(await visibleReply == "200", "visible connection receives the delayed 200");
+            CheckCacheUnchanged(previousCache, "Success");
+            window.Hide();
 
             await NavigateSettings();
             used = 99;
@@ -1285,7 +1489,9 @@ internal static class PacingProbe
 
             await NavigateSettings();
             clock.Advance(29);
-            holdReply = true;
+            requestPaused = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            releaseReply = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            heldUrl = origin + endpoint;
             Task late = Receive(changeRoute: true);
             await requestPaused.Task.WaitAsync(limit);
             Check(Active(), "request started before the response deadline");
@@ -1293,7 +1499,7 @@ internal static class PacingProbe
             Invoke(refresh, "Expire");
             releaseReply.SetResult(true);
             await late;
-            holdReply = false;
+            heldUrl = null;
             CheckCacheUnchanged(previousCache, "ResponseTimeout");
 
             await NavigateSettings();
@@ -1312,8 +1518,6 @@ internal static class PacingProbe
             }
 
             previousCache = await VerifyRefresh(66, bootstrap: true);
-            window.Opacity = 0;
-            window.ShowInTaskbar = false;
             window.Show();
             await NavigateSettings();
             await Evaluate("history.replaceState(null,'','/settings/usage');history.replaceState(null,'','/settings');");
@@ -1368,11 +1572,16 @@ internal static class PacingProbe
             await NavigateTo(origin + "/fixture-idle");
 
             endpointStatus = 200;
-            await NavigateSettings();
-            Check(Active(), "shutdown occurs during a pending bootstrap");
+            previousCache = await VerifyRefresh(88, bootstrap: false, trigger: "Connection");
+            window.Hide();
+            await NavigateUsage();
+            Task<string> stoppedReply = await HoldUsageReply();
+            await SameDocument("/new");
+            Check(Active(), "shutdown occurs during a held response on /new");
             Invoke(refresh, "Stop");
-            await Receive(changeRoute: true);
-            CheckCacheUnchanged(previousCache, "LoginRequired");
+            releaseReply.SetResult(true);
+            Check(await stoppedReply == "200", "browser completes the held request after shutdown");
+            CheckCacheUnchanged(previousCache, "Success");
             Check(Get(State(), "Phase")!.ToString() == "Stopped", "shutdown ignores the late response");
             Console.WriteLine("PASS: actual WebView2 Claude navigation fixture; intercepted requests, isolated profile.");
         }
