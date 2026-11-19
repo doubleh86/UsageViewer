@@ -139,8 +139,15 @@ pwsh -NoProfile -File .\Tools\Test-CodexProfileFallback.ps1
 pwsh -NoProfile -File .\Tools\Test-ClaudeRefreshReliability.ps1 -SourceOnly
 ```
 
-후속 Release 빌드에서 `-SourceOnly`를 빼면 실제 DLL의 합성 시계·응답·저장 검사와 별도 프로필의 264/280/320 DIP 렌더링 검사도 실행된다.
-이번 변경의 검증 범위는 소스/HTML 및 `git diff --check`다. Release 빌드, 실제 DLL·WebView2 렌더링, ZIP 생성, 실계정 수신은 실행하지 않았다.
+### Claude 갱신 검증 기록 (2026-11-19)
+
+- **구현 및 검증 대상:** 기존 구현 커밋 `5a419bc`를 보존하고, `Tools/Test-UsagePacing.ps1`의 `CheckPresentation` 내부 변수와 참조만 `claudeProvider`로 바꿔 `CS0136`을 해결했다. 검증은 이 결과 커밋 후보(테스트 드라이버 Git blob `be14ab49fad6`)에서 실행했다. 결과 커밋은 오케스트레이터가 생성하므로 최종 SHA 및 커밋 후 재검증은 아직 확인하지 않았다.
+- **등록 격리 검사:** 등록 명령은 `pwsh -NoProfile -File Tools/Test-ClaudeRefreshReliability.ps1 -SourceOnly` 하나다. 동일 명령을 실행해 소스/HTML 30건을 통과했다. 이 명령은 빌드, DLL 로드, Git 공백 검사, WebView2를 실행하지 않는다.
+- **별도 공백 검사:** `git diff --check 5a419bc^ 5a419bc`로 구현 커밋을, `git diff --check 5a419bc^`로 보정을 포함한 결과 후보 전체를 검사해 통과했다.
+- **일반 Release 빌드:** `dotnet build src/UsageViewer/UsageViewer.csproj -c Release`를 기존 사용자 설치 SDK로 신뢰된 작업공간에서 실행해 경고 0개, 오류 0개로 성공했다. 시스템 기본 `dotnet`에는 SDK가 없었고 샌드박스에서는 SDK의 레지스트리 접근이 차단됐다. 설정은 변경하지 않았다.
+- **실제 DLL 합성 검사:** 별도로 `pwsh -NoProfile -File Tools/Test-UsagePacing.ps1`을 실행했다. 실제 Release DLL과 합성 시계·응답·저장 환경을 사용한 전체 432건을 통과했다. 이 수에는 아래 렌더링 검사도 포함된다.
+- **격리 렌더링:** 임시 WebView2 프로필에서 264/280/320 DIP의 Codex·Claude 탭과 함께 보기, 상태 문구와 가로 넘침 검사를 통과했다. 사용자 앱이나 기존 프로필을 사용하지 않았다.
+- **사용자 확인 및 패키징:** 실계정 수신과 사용자 화면 확인은 미실행이다. 사용자가 직접 연결한 뒤 자동 갱신, 일시 단절 후 복구, 재로그인 안내를 확인해야 한다. 반복된 ‘갱신 필요’의 원인은 확정하지 않았다. 기존 게시 출력 경로와 진단 파일 제외 규칙만 확인했으며, Computer Use, ZIP 생성, 실행본 교체, Main 반영, push, 배포는 하지 않았다.
 
 ## 팝업 디자인
 

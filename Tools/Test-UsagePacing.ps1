@@ -1036,9 +1036,9 @@ internal static class PacingProbe
             _claudeStatusDocument = JsonSerializer.Serialize(Invoke(popup, "BuildDocumentState"));
             using (JsonDocument statusPayload = JsonDocument.Parse(_claudeStatusDocument))
             {
-                JsonElement provider = statusPayload.RootElement.GetProperty("providers")[1];
-                Check(provider.GetProperty("previous").GetBoolean() && !provider.GetProperty("canConnect").GetBoolean() &&
-                      provider.GetProperty("windows")[0].GetProperty("alert").GetString() == "none", "previous value has no reconnect or new exhaustion alert");
+                JsonElement claudeProvider = statusPayload.RootElement.GetProperty("providers")[1];
+                Check(claudeProvider.GetProperty("previous").GetBoolean() && !claudeProvider.GetProperty("canConnect").GetBoolean() &&
+                      claudeProvider.GetProperty("windows")[0].GetProperty("alert").GetString() == "none", "previous value has no reconnect or new exhaustion alert");
             }
             using (JsonDocument tomorrowPayload = JsonDocument.Parse(_tomorrowDocument))
             {
