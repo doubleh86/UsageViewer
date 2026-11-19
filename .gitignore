@@ -24,5 +24,7 @@ credentials.json
 id_rsa
 id_ed25519
 alerts.json
+claude-refresh-diagnostics.json
+claude-refresh-diagnostics.json.tmp
 hourly-allowance.json
 hourly-allowance.json.*.tmp

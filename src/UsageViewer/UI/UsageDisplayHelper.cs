@@ -4,8 +4,55 @@ using UsageViewer.Services;
 
 namespace UsageViewer.UI;
 
+internal sealed record ClaudeUsageDisplay(string? ShortStatus, string? Detail, string? PreviousMark, bool CanConnect,
+                                          bool IsCurrent);
+
 internal static class UsageDisplayHelper
 {
+    public static ClaudeUsageDisplay DescribeClaude(ClaudeRefreshState state, DateTimeOffset now)
+    {
+        string received = state.Snapshot is UsageSnapshot snapshot ?
+                          $" · 마지막 수신 {snapshot.RetrievedAt.ToLocalTime():HH:mm}" : "";
+        ClaudeUsageDisplay? blocked = state.Result switch
+        {
+            ClaudeRefreshResult.LoginRequired => new("로그인 확인", "연결 창에서 로그인 상태를 확인해 주세요.", null, true, false),
+            ClaudeRefreshResult.AccessRequired => new("접근 확인", "Claude 페이지에서 접근 상태를 확인해 주세요.", null, true, false),
+            ClaudeRefreshResult.RateLimited => new("잠시 대기", "요청 제한 · 잠시 후 다시 확인합니다.", null, false, false),
+            ClaudeRefreshResult.ResponseFormat or ClaudeRefreshResult.ResponseRange =>
+                new("응답 확인", "사용량 정보를 확인하지 못했어요.", null, true, false),
+            ClaudeRefreshResult.StorageRead or ClaudeRefreshResult.StorageWrite =>
+                new("저장 확인", "로컬 사용량 파일을 " +
+                    (state.Result == ClaudeRefreshResult.StorageRead ? "읽지" : "저장하지") + " 못했어요.", null, false, false),
+            _ => null
+        };
+        if (blocked != null)
+        {
+            return blocked with { Detail = blocked.Detail + received + (state.IsActive == true ? " · 조회 중" : "") };
+        }
+
+        if (state.Snapshot != null && ClaudeRefreshPolicy.IsFresh(state.Snapshot, now) == false)
+        {
+            return new("갱신 지연", "갱신 지연" + received, null, false, false);
+        }
+
+        if (state.IsActive == true)
+        {
+            return new(state.Snapshot == null ? "조회 중" : null, "사용량 확인 중…" + received, "↻", false, false);
+        }
+
+        if (ClaudeRefreshPolicy.IsTransient(state.Result) == true)
+        {
+            return new(state.Snapshot == null ? "갱신 지연" : null, "일시 오류 · 자동 재시도" + received, "!", false, false);
+        }
+
+        return state.Result switch
+        {
+            ClaudeRefreshResult.Success => new(null, null, null, false, true),
+            _ when state.Snapshot != null => new(null, "이전 수신 값" + received, "!", false, false),
+            _ => new("조회 대기", "공식 Claude 페이지에서 로그인 후 사용량 화면을 열어 주세요.", null, true, false)
+        };
+    }
+
     public static string FormatLimitCoverage(UsageSnapshot? snapshot)
     {
         if (snapshot == null)
@@ -196,8 +243,10 @@ internal static class UsageDisplayHelper
 
     public static bool IsExpired(UsageWindow window)
     {
-        return window.ResetsAt != null && window.ResetsAt <= DateTimeOffset.UtcNow;
+        return IsExpired(window, DateTimeOffset.UtcNow);
     }
+
+    public static bool IsExpired(UsageWindow window, DateTimeOffset now) => window.ResetsAt <= now;
 
     public static string FormatReset(UsageWindow window)
     {

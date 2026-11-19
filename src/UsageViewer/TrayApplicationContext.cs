@@ -9,8 +9,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly CodexUsageClient _client = new CodexUsageClient();
     private readonly AiInstallationDetector _installationDetector = new AiInstallationDetector();
     private readonly ClaudeUsageStore _claudeStore = new ClaudeUsageStore();
-    private readonly string _claudeWebCachePath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UsageViewer", "claude-web-usage.json");
+    private readonly ClaudeUsageStore _claudeWebStore = new ClaudeUsageStore(Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UsageViewer", "claude-web-usage.json"));
+    private readonly ClaudeRefreshDiagnostics _claudeDiagnostics = new ClaudeRefreshDiagnostics();
+    private readonly ClaudeRefreshCoordinator _claudeRefresh;
     private readonly CancellationTokenSource _shutdown = new CancellationTokenSource();
     private readonly UsagePopup _popup = new UsagePopup();
     private readonly TopUsageBar _topBar = new TopUsageBar();
@@ -21,7 +23,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly NotifyIcon _tray;
     private readonly ContextMenuStrip _menu = new ContextMenuStrip();
     private readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer { Interval = 5_000 };
-    private readonly ToolStripItem _refreshMenuItem;
     private readonly ToolStripMenuItem _topBarMenuItem;
     private readonly ToolStripMenuItem _alwaysOnTopMenuItem;
     private readonly ToolStripMenuItem _alertSoundMenuItem;
@@ -33,26 +34,26 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private bool _refreshing;
     private bool _exiting;
     private Point? _lastTrayAnchor;
-    private UsageSnapshot? _claudeSnapshot;
-    private string? _claudeError = "한 번 연결하면 자동으로 갱신됩니다.";
-    private bool _claudeStale;
+    private UsageSnapshot? _claudeCodeSnapshot;
+    private string? _claudeCodeError = "한 번 연결하면 자동으로 갱신됩니다.";
+    private bool _claudeWebSelected;
+    private bool _claudeCacheLoaded;
     private bool _claudeReading;
     private DateTimeOffset _lastCodexAttempt;
-    private DateTimeOffset _lastClaudeWebRefresh;
     private ClaudeConnectionWindow? _claudeConnection;
     private CodexConnectionWindow? _codexConnection;
-    private string? _claudeWebError;
     private IReadOnlyList<DetectedAiApp> _installed = Array.Empty<DetectedAiApp>();
 
     public TrayApplicationContext(bool showOnStart, EventWaitHandle showSignal)
     {
+        _claudeRefresh = new ClaudeRefreshCoordinator(record: _claudeDiagnostics.Record);
         _icon = TrayIconFactory.Create(Color.FromArgb(151, 164, 181));
         _installed = _installationDetector.Detect();
         _popup.SetDetectedApps(_installed);
         _menu.Items.Add("사용량 보기", null, (_, _) => ShowPopup(_lastTrayAnchor ?? Cursor.Position));
-        _refreshMenuItem = _menu.Items.Add("새로고침", null, async (_, _) => await RefreshAsync());
+        _menu.Items.Add("새로고침", null, async (_, _) => await RequestRefreshAsync());
         _menu.Items.Add("Codex 구독 연결 / 계정 확인", null, async (_, _) => await ConnectCodexAsync());
-        _menu.Items.Add("Claude 구독 연결 / 계정 확인", null, async (_, _) => await GetClaudeConnection().ConnectAsync());
+        _menu.Items.Add("Claude 구독 연결 / 계정 확인", null, async (_, _) => await ConnectClaudeAsync());
         _menu.Items.Add(new ToolStripSeparator());
         _topBarMenuItem = new ToolStripMenuItem("모니터 상단에 표시") { CheckOnClick = true };
         _alwaysOnTopMenuItem = new ToolStripMenuItem("항상 가장 앞에 표시") { CheckOnClick = true };
@@ -110,27 +111,34 @@ internal sealed class TrayApplicationContext : ApplicationContext
             }
         };
         _tray.MouseDown += (_, _) => _lastTrayAnchor = Cursor.Position;
-        _popup.RefreshRequested += async (_, _) => await RefreshAsync();
+        _popup.RefreshRequested += async (_, _) => await RequestRefreshAsync();
         _popup.CodexConnectRequested += async (_, _) => await ConnectCodexAsync();
         _popup.ClaudeConnectRequested += async (_, _) =>
         {
             _popup.Hide();
-            await GetClaudeConnection().ConnectAsync();
+            await ConnectClaudeAsync();
         };
-        _timer.Tick += async (_, _) =>
+        _claudeRefresh.Changed += (_, _) =>
+        {
+            if (_exiting == false)
+            {
+                UpdatePopup();
+                UpdateTray();
+            }
+        };
+        _timer.Tick += (_, _) =>
         {
             if (DateTimeOffset.UtcNow - _lastCodexAttempt >= TimeSpan.FromSeconds(60))
             {
-                _ = RefreshAsync();
+                _ = RefreshCodexAsync();
             }
 
-            if (_claudeConnection != null && DateTimeOffset.UtcNow - _lastClaudeWebRefresh >= TimeSpan.FromSeconds(60))
-            {
-                _lastClaudeWebRefresh = DateTimeOffset.UtcNow;
-                _ = _claudeConnection.RefreshInBackgroundAsync();
-            }
-
-            await ReadClaudeAsync();
+            _claudeRefresh.Expire();
+            _claudeDiagnostics.Maintain();
+            _ = _claudeConnection?.RefreshAsync(ClaudeRefreshTrigger.Automatic);
+            _ = ReadClaudeCodeAsync();
+            UpdatePopup();
+            UpdateTray();
         };
         UpdatePopup();
 
@@ -155,14 +163,17 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _popup.BeginInvoke(new Action(async () =>
         {
             _timer.Start();
-            Task codexRefresh = RefreshAsync();
+            Task codexRefresh = RefreshCodexAsync();
+            _claudeDiagnostics.Maintain();
             string profile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                                            "UsageViewer", "ClaudeWebProfile");
             if (Directory.Exists(profile) == true)
             {
-                _ = GetClaudeConnection().ResumeInBackgroundAsync();
+                _claudeWebSelected = true;
+                _ = GetClaudeConnection().RefreshAsync(ClaudeRefreshTrigger.Automatic);
             }
 
+            _ = LoadClaudeWebCacheAsync();
             if (showOnStart == true)
             {
                 Rectangle area = Screen.PrimaryScreen?.WorkingArea ?? Screen.FromControl(_popup).WorkingArea;
@@ -173,7 +184,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }));
     }
 
-    private Task RefreshAsync()
+    private Task RequestRefreshAsync()
+    {
+        Task codex = RefreshCodexAsync();
+        _ = _claudeConnection?.RefreshAsync(ClaudeRefreshTrigger.Manual);
+        _ = ReadClaudeCodeAsync();
+        return codex;
+    }
+
+    private Task RefreshCodexAsync()
     {
         if (_refreshing == true || _exiting == true || _codexConnection?.IsConnecting == true)
         {
@@ -191,17 +210,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _installed = _installationDetector.Detect();
         _popup.SetDetectedApps(_installed);
         _lastCodexAttempt = DateTimeOffset.UtcNow;
-        _refreshMenuItem.Enabled = false;
         UpdatePopup();
         try
         {
-            if (_claudeConnection != null)
-            {
-                _lastClaudeWebRefresh = DateTimeOffset.UtcNow;
-                _ = _claudeConnection.RefreshInBackgroundAsync();
-            }
-
-            _ = ReadClaudeAsync();
             if (_installed.Any(app => app.Id == "codex") == true)
             {
                 _snapshot = await _client.ReadAsync(_shutdown.Token);
@@ -231,7 +242,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _refreshing = false;
             if (_exiting == false)
             {
-                _refreshMenuItem.Enabled = true;
                 UpdatePopup();
                 UpdateTray();
             }
@@ -274,20 +284,51 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         _topBar.SetDetailsOpen(fromTopBar);
-        _ = ReadClaudeAsync();
+        _ = ReadClaudeCodeAsync();
         bool oldSnapshot = _snapshot == null || DateTimeOffset.UtcNow - _snapshot.RetrievedAt >= TimeSpan.FromSeconds(60);
         bool expiredWindow = _snapshot?.Buckets.Any(bucket =>
             (bucket.Primary != null && UsageDisplayHelper.IsExpired(bucket.Primary) == true) ||
             (bucket.Secondary != null && UsageDisplayHelper.IsExpired(bucket.Secondary) == true)) == true;
         if (oldSnapshot == true || expiredWindow == true)
         {
-            _ = RefreshAsync();
+            _ = RefreshCodexAsync();
         }
     }
 
-    private async Task ReadClaudeAsync()
+    private async Task LoadClaudeWebCacheAsync()
     {
-        if (_claudeReading == true || _exiting == true)
+        try
+        {
+            UsageSnapshot? snapshot = await _claudeWebStore.ReadWebAsync(_shutdown.Token);
+            if (_exiting == false && snapshot != null)
+            {
+                _claudeWebSelected = true;
+                _claudeRefresh.RestoreCache(snapshot, failed: false);
+            }
+        }
+        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested == true)
+        {
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                          System.Text.Json.JsonException or UsageQueryException)
+        {
+            if (_exiting == false)
+            {
+                _claudeWebSelected = true;
+                _claudeRefresh.RestoreCache(null, failed: true);
+            }
+        }
+        finally
+        {
+            _claudeCacheLoaded = true;
+        }
+
+        await ReadClaudeCodeAsync();
+    }
+
+    private async Task ReadClaudeCodeAsync()
+    {
+        if (_claudeReading == true || _exiting == true || _claudeCacheLoaded == false || _claudeWebSelected == true)
         {
             return;
         }
@@ -295,32 +336,29 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _claudeReading = true;
         try
         {
-            bool webSource = File.Exists(_claudeWebCachePath);
-            ClaudeUsageStore source = webSource == true ? new ClaudeUsageStore(_claudeWebCachePath) : _claudeStore;
-            ClaudeUsageReadResult result = await source.ReadAsync(_shutdown.Token);
-            _claudeSnapshot = webSource == true ? result.Snapshot with { PlanName = "Claude Web" } : result.Snapshot;
-            _claudeStale = result.IsStale;
-            _claudeError = _claudeWebError;
+            UsageSnapshot? snapshot = await _claudeStore.ReadAsync(_shutdown.Token);
+            if (_exiting == false && _claudeWebSelected == false)
+            {
+                _claudeCodeSnapshot = snapshot;
+                _claudeCodeError = snapshot == null ? "한 번 연결하면 자동으로 갱신됩니다." : null;
+            }
         }
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested == true)
         {
             return;
         }
-        catch (UsageQueryException exception)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                          System.Text.Json.JsonException or UsageQueryException)
         {
-            _claudeSnapshot = null;
-            _claudeError = File.Exists(_claudeWebCachePath) == true ? exception.Message :
-                           "한 번 연결하면 자동으로 갱신됩니다.";
-        }
-        catch (Exception)
-        {
-            _claudeError = "Claude 사용량 수신 파일을 읽지 못했습니다. 다음 수신을 기다려 주세요.";
-            _claudeStale = true;
+            if (_exiting == false && _claudeWebSelected == false)
+            {
+                _claudeCodeError = "Claude 사용량 수신 파일을 읽지 못했습니다. 다음 수신을 기다려 주세요.";
+            }
         }
         finally
         {
             _claudeReading = false;
-            if (_exiting == false)
+            if (_exiting == false && _claudeWebSelected == false)
             {
                 UpdatePopup();
                 UpdateTray();
@@ -336,23 +374,31 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         DateTimeOffset now = DateTimeOffset.UtcNow;
+        UsageSnapshot? claudeSnapshot = GetClaudeSnapshot();
+        ClaudeUsageDisplay? claudeWeb = GetClaudeDisplay(now);
+        string? claudeError = _claudeWebSelected == true ? null : _claudeCodeError;
+        bool claudeStale = IsClaudeStale(claudeSnapshot, claudeWeb, now);
         UsagePacingAdvice codex = UsagePacingAdvisor.Evaluate(_snapshot, _error, false, now);
-        UsagePacingAdvice claude = UsagePacingAdvisor.Evaluate(_claudeSnapshot, _claudeError, _claudeStale, now);
+        UsagePacingAdvice claude = UsagePacingAdvisor.Evaluate(claudeSnapshot, claudeError, claudeStale, now);
         TimeZoneInfo zone = TimeZoneInfo.Local;
         codex = _dailyAllowances.Apply("codex", _snapshot, codex, now, zone);
-        claude = _dailyAllowances.Apply("claude", _claudeSnapshot, claude, now, zone);
+        if (claudeStale == false && claudeError == null)
+        {
+            claude = _dailyAllowances.Apply("claude", claudeSnapshot, claude, now, zone);
+        }
+
         _ = _dailyAllowances.SaveAsync();
-        _popup.SetState(_snapshot, _refreshing, _error, _claudeSnapshot, _claudeError, _claudeStale, codex, claude);
-        _topBar.SetUsage(_installed, _snapshot, _error, _claudeSnapshot, _claudeError, _claudeStale);
-        UpdateUsageAlerts();
+        _popup.SetState(_snapshot, _refreshing, _error, claudeSnapshot, claudeError, claudeStale, codex, claude, claudeWeb);
+        _topBar.SetUsage(_installed, _snapshot, _error, claudeSnapshot, claudeError, claudeStale, claudeWeb);
+        UpdateUsageAlerts(claudeSnapshot, claudeError, claudeStale, now);
     }
 
-    private void UpdateUsageAlerts()
+    private void UpdateUsageAlerts(UsageSnapshot? claude, string? claudeError, bool claudeStale, DateTimeOffset now)
     {
         if (_exiting == false)
         {
-            IReadOnlyList<UsageAlert> alerts = _alerts.Evaluate(_snapshot, _error, _claudeSnapshot, _claudeError,
-                                                               _claudeStale, DateTimeOffset.UtcNow, _topBar.IsFullScreen);
+            IReadOnlyList<UsageAlert> alerts = _alerts.Evaluate(_snapshot, _error, claude, claudeError,
+                                                               claudeStale, now, _topBar.IsFullScreen);
             if (alerts.Count > 0)
             {
                 _alertToast.ShowAlerts(alerts, _topBar.Location);
@@ -365,29 +411,39 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    private ClaudeConnectionWindow GetClaudeConnection()
+    private UsageSnapshot? GetClaudeSnapshot() =>
+        _claudeWebSelected == true ? _claudeRefresh.State.Snapshot : _claudeCodeSnapshot;
+
+    private ClaudeUsageDisplay? GetClaudeDisplay(DateTimeOffset now)
     {
-        if (_claudeConnection == null)
+        if (_claudeWebSelected == false)
         {
-            _claudeConnection = new ClaudeConnectionWindow(new ClaudeUsageStore(_claudeWebCachePath));
-            _claudeConnection.UsageReceived += async (_, _) =>
-            {
-                _claudeWebError = null;
-                await ReadClaudeAsync();
-            };
-            _claudeConnection.ConnectionError += (_, message) =>
-            {
-                _claudeWebError = message;
-                _claudeError = message;
-                if (_exiting == false)
-                {
-                    UpdatePopup();
-                }
-            };
+            return null;
         }
 
-        return _claudeConnection;
+        ClaudeUsageDisplay display = UsageDisplayHelper.DescribeClaude(_claudeRefresh.State, now);
+        return _claudeConnection == null ? display with { CanConnect = true } : display;
     }
+
+    private bool IsClaudeStale(UsageSnapshot? snapshot, ClaudeUsageDisplay? view, DateTimeOffset now) =>
+        view?.IsCurrent == false || ClaudeRefreshPolicy.IsFresh(snapshot, now) == false;
+
+    private Task ConnectClaudeAsync()
+    {
+        if (_exiting == true)
+        {
+            return Task.CompletedTask;
+        }
+
+        _claudeWebSelected = true;
+        Task connection = GetClaudeConnection().ConnectAsync();
+        UpdatePopup();
+        UpdateTray();
+        return connection;
+    }
+
+    private ClaudeConnectionWindow GetClaudeConnection() =>
+        _claudeConnection ??= new ClaudeConnectionWindow(_claudeWebStore, _claudeRefresh);
 
     private async Task ConnectCodexAsync()
     {
@@ -456,9 +512,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         Icon previousIcon = _icon;
-        if (_claudeSnapshot != null && _claudeError == null && _claudeStale == false)
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        UsageSnapshot? claude = GetClaudeSnapshot();
+        ClaudeUsageDisplay? claudeWeb = GetClaudeDisplay(now);
+        if (claude != null && (_claudeWebSelected == true || _claudeCodeError == null) &&
+            IsClaudeStale(claude, claudeWeb, now) == false)
         {
-            List<UsageWindow> claudeWindows = _claudeSnapshot.Buckets
+            List<UsageWindow> claudeWindows = claude.Buckets
                 .SelectMany(bucket => new[] { bucket.Primary, bucket.Secondary }).OfType<UsageWindow>()
                 .Where(window => UsageDisplayHelper.IsExpired(window) == false).ToList();
             if (claudeWindows.Count > 0)
@@ -487,6 +547,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         _exiting = true;
         _timer.Stop();
+        _claudeRefresh.Stop();
         _shutdown.Cancel();
         _popup.Hide();
         _topBar.CloseForExit();
@@ -503,6 +564,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         await _dailyAllowances.SaveAsync();
+        await _claudeDiagnostics.FlushAsync();
         _tray.Visible = false;
         _popup.CloseForExit();
         ExitThread();
@@ -512,6 +574,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         if (disposing == true)
         {
+            _exiting = true;
+            _claudeRefresh.Stop();
             _shutdown.Cancel();
             _showRegistration.Unregister(null);
             _timer.Dispose();

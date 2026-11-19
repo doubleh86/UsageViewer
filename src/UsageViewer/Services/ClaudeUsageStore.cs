@@ -4,9 +4,11 @@ using UsageViewer.Models;
 
 namespace UsageViewer.Services;
 
-internal sealed record ClaudeUsageCache(DateTimeOffset CapturedAt, UsageWindow? FiveHour, UsageWindow? SevenDay);
-
-internal sealed record ClaudeUsageReadResult(UsageSnapshot Snapshot, bool IsStale);
+internal sealed record ClaudeUsageCache(DateTimeOffset CapturedAt, UsageWindow? FiveHour, UsageWindow? SevenDay)
+{
+    public UsageSnapshot ToSnapshot(string source) =>
+        new UsageSnapshot(source, new[] { new UsageBucket("claude", "Claude", FiveHour, SevenDay) }, CapturedAt);
+}
 
 internal sealed class ClaudeUsageStore
 {
@@ -51,22 +53,11 @@ internal sealed class ClaudeUsageStore
         }
 
         ClaudeUsageCache cache = new ClaudeUsageCache(DateTimeOffset.UtcNow, fiveHour, sevenDay);
-        string fullPath = Path.GetFullPath(_path);
-        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
-        string temporaryPath = fullPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        try
+        await SaveAsync(cache, replace =>
         {
-            string normalized = JsonSerializer.Serialize(cache);
-            await File.WriteAllTextAsync(temporaryPath, normalized, cancellationToken);
-            File.Move(temporaryPath, fullPath, overwrite: true);
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath) == true)
-            {
-                File.Delete(temporaryPath);
-            }
-        }
+            cancellationToken.ThrowIfCancellationRequested();
+            replace();
+        }, cancellationToken);
 
         List<string> parts = new List<string>();
         if (fiveHour != null)
@@ -82,20 +73,70 @@ internal sealed class ClaudeUsageStore
         return parts.Count == 0 ? "Claude usage pending" : string.Join(" | ", parts);
     }
 
-    public async Task<ClaudeUsageReadResult> ReadAsync(CancellationToken cancellationToken)
+    public async Task<UsageSnapshot?> ReadAsync(CancellationToken cancellationToken)
     {
-        if (File.Exists(_path) == false)
+        ClaudeUsageCache? cache = await ReadCacheAsync(cancellationToken);
+        return cache == null || (cache.FiveHour == null && cache.SevenDay == null) ? null : cache.ToSnapshot("Claude Code");
+    }
+
+    public async Task<UsageSnapshot?> ReadWebAsync(CancellationToken cancellationToken)
+    {
+        ClaudeUsageCache? cache = await ReadCacheAsync(cancellationToken);
+        if (cache != null && cache.FiveHour == null && cache.SevenDay == null)
         {
-            throw new UsageQueryException("Claude Code 터미널에서 응답을 받아 주세요. 데스크톱만 사용하면 사용량이 수신되지 않습니다.");
+            throw new UsageQueryException("Claude 웹 사용량 파일에 한도 정보가 없습니다.");
         }
 
-        if (new FileInfo(_path).Length > 65536)
+        return cache?.ToSnapshot("Claude Web");
+    }
+
+    public async Task SaveAsync(ClaudeUsageCache cache, Action<Action> commit, CancellationToken cancellationToken)
+    {
+        string fullPath = Path.GetFullPath(_path);
+        string temporaryPath = fullPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+            await File.WriteAllTextAsync(temporaryPath, JsonSerializer.Serialize(cache), cancellationToken);
+            commit(() => File.Move(temporaryPath, fullPath, overwrite: true));
+        }
+        finally
+        {
+            DeleteTemporary(temporaryPath);
+        }
+    }
+
+    internal static void DeleteTemporary(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private async Task<ClaudeUsageCache?> ReadCacheAsync(CancellationToken cancellationToken)
+    {
+        FileStream stream;
+        try
+        {
+            stream = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete,
+                                    4096, FileOptions.Asynchronous);
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return null;
+        }
+
+        using FileStream input = stream;
+        if (input.Length > 65536)
         {
             throw new UsageQueryException("Claude 사용량 파일 형식이 올바르지 않습니다.");
         }
 
-        using FileStream stream = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        ClaudeUsageCache? cache = await JsonSerializer.DeserializeAsync<ClaudeUsageCache>(stream,
+        ClaudeUsageCache? cache = await JsonSerializer.DeserializeAsync<ClaudeUsageCache>(input,
                                                                                          cancellationToken: cancellationToken);
         if (cache == null || cache.CapturedAt == default || cache.CapturedAt > DateTimeOffset.UtcNow.AddMinutes(1))
         {
@@ -104,15 +145,7 @@ internal sealed class ClaudeUsageStore
 
         ValidateWindow(cache.FiveHour, 300);
         ValidateWindow(cache.SevenDay, 10080);
-        if (cache.FiveHour == null && cache.SevenDay == null)
-        {
-            throw new UsageQueryException("Claude가 사용 한도를 아직 제공하지 않았습니다. Claude의 다음 응답 후 갱신됩니다.");
-        }
-
-        UsageBucket bucket = new UsageBucket("claude", "Claude", cache.FiveHour, cache.SevenDay);
-        UsageSnapshot snapshot = new UsageSnapshot("Claude Code", new[] { bucket }, cache.CapturedAt);
-
-        return new ClaudeUsageReadResult(snapshot, DateTimeOffset.UtcNow - cache.CapturedAt > TimeSpan.FromMinutes(15));
+        return cache;
     }
 
     private UsageWindow? ReadWindow(JsonElement limits, string name, int durationMinutes)

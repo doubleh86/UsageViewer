@@ -1,6 +1,7 @@
 ﻿param(
     [string]$DotNetPath = (Join-Path $env:USERPROFILE '.dotnet/dotnet.exe'),
-    [switch]$SourceOnly
+    [switch]$SourceOnly,
+    [switch]$ClaudeRefreshOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -101,6 +102,7 @@ using System.Reflection;
 using System.Runtime.Loader;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Drawing;
 using System.Windows.Forms;
@@ -115,6 +117,7 @@ internal static class PacingProbe
     private static string _document = "";
     private static string _dailyDocument = "";
     private static string _tomorrowDocument = "";
+    private static string _claudeStatusDocument = "";
     private static readonly DateTimeOffset Start = DateTimeOffset.Parse("2026-11-09T18:12:00+09:00");
     private static readonly DateTimeOffset DailyStart = DateTimeOffset.Parse("2026-11-09T00:00:00+09:00");
     private static readonly DateTimeOffset Reset = DateTimeOffset.Parse("2026-11-14T01:10:00+09:00");
@@ -131,13 +134,17 @@ internal static class PacingProbe
                 return File.Exists(path) ? AssemblyLoadContext.Default.LoadFromAssemblyPath(path) : null;
             };
             _app = Assembly.LoadFrom(args[0]);
-            CheckExamples();
-            CheckInvalid();
-            CheckTime();
-            CheckStateless();
-            CheckDailyAllowance();
-            CheckDailyFormula();
-            CheckTomorrowGuidance();
+            if (args.Length == 2)
+            {
+                CheckExamples();
+                CheckInvalid();
+                CheckTime();
+                CheckStateless();
+                CheckDailyAllowance();
+                CheckDailyFormula();
+                CheckTomorrowGuidance();
+            }
+            CheckClaudeRefresh();
             CheckPresentation();
             CheckRendering();
             Console.WriteLine($"PASS: {_passed} synthetic usage-pacing checks; no accounts or user settings accessed.");
@@ -175,6 +182,183 @@ internal static class PacingProbe
     private static object Snapshot(DateTimeOffset at, params object[] buckets) => New("Models.UsageSnapshot",
         "synthetic", ArrayOf("Models.UsageBucket", buckets), at);
     private static object Sample(double remaining = 76) => Snapshot(Start, Bucket("weekly", Week(remaining)));
+
+    private static object ClaudeEnum(string type, string value) => Enum.Parse(TypeOf("Models.ClaudeRefresh" + type), value);
+
+    private static void CheckClaudeRefresh()
+    {
+        const string policy = "Services.ClaudeRefreshPolicy";
+        var clock = new ClaudeFixtureClock();
+        object refresh = New("Services.ClaudeRefreshCoordinator", clock, null);
+        object State() => Get(refresh, "State")!;
+        string Result() => Get(State(), "Result")!.ToString()!;
+        DateTimeOffset? Next() => (DateTimeOffset?)Get(State(), "NextAttempt");
+        object? Begin(string trigger = "Automatic", bool ready = true, bool visible = false) =>
+            Invoke(refresh, "TryBegin", ClaudeEnum("Trigger", trigger), ready, visible);
+        void Fail(object attempt, string result, int? status = null, DateTimeOffset? retry = null) =>
+            Invoke(refresh, "Fail", attempt, ClaudeEnum("Result", result), status, retry);
+        object Describe(DateTimeOffset at) => Static("UI.UsageDisplayHelper", "DescribeClaude", State(), at);
+
+        Check(Begin(visible: true) == null, "visible login/interaction never triggers background navigation");
+        object init = Begin(ready: false)!;
+        Check(Begin("Manual") == null && Begin("Connection") == null, "all triggers share the active initialization");
+        clock.Advance(59);
+        Check((bool)Invoke(refresh, "Accepts", init), "initialization still active at 59 seconds");
+        clock.Advance(1);
+        Check(!(bool)Invoke(refresh, "Initialized", init) && Result() == "InitializationTimeout", "60-second initialization deadline");
+        Check(Next() == clock.GetUtcNow().AddSeconds(30), "initial retry in 30 seconds");
+        Check(Begin() == null, "normal timer observes earlier retry gate");
+        object initialized = Begin("Manual", ready: false)!;
+        clock.Advance(59);
+        Check((bool)Invoke(refresh, "Initialized", initialized), "initialization and response deadlines are distinct");
+        clock.Advance(29);
+        Check((bool)Invoke(refresh, "Accepts", initialized) && Begin("Manual") == null, "attempt still active and deduplicated at 29 seconds");
+        clock.Advance(1);
+        Invoke(refresh, "Expire");
+        Check(Result() == "ResponseTimeout" && Next() == clock.GetUtcNow().AddMinutes(2), "response timeout and two-minute retry");
+        Fail(Begin("Manual")!, "NavigationFailed");
+        Check(Next() == clock.GetUtcNow().AddMinutes(5), "navigation retry reaches five-minute cap");
+        Fail(Begin("Manual")!, "NetworkFailed");
+        Check(Next() == clock.GetUtcNow().AddMinutes(5), "network retry stays capped");
+
+        foreach ((int status, string result) in new[] { (200, "Success"), (401, "LoginRequired"), (403, "AccessRequired"),
+                 (429, "RateLimited"), (503, "ServerError"), (418, "HttpError") })
+        {
+            Check(Static(policy, "ClassifyHttp", status).ToString() == result, "distinct HTTP classification " + status);
+        }
+        var at = clock.GetUtcNow();
+        Check((DateTimeOffset?)Static(policy, "ParseRetryAfter", "180", at) == at.AddSeconds(180), "delay-seconds parsed");
+        Check((DateTimeOffset?)Static(policy, "ParseRetryAfter", at.AddMinutes(7).ToString("r"), at) == at.AddMinutes(7), "HTTP-date parsed");
+        Check(Static(policy, "ParseRetryAfter", "-9", at) == null, "invalid delay does not suppress retry");
+        Fail(Begin("Manual")!, "RateLimited", 429, at.AddSeconds(180));
+        Check(Next() == at.AddSeconds(180) && Begin("Manual") == null && Begin("Connection") == null,
+            "server not-before overrides automatic and manual triggers");
+        Check((string?)Get(Describe(at), "ShortStatus") == "잠시 대기", "rate limit has short status");
+        clock.Advance(180);
+        object cancelled = Begin()!;
+        Invoke(refresh, "Cancel", cancelled);
+        Check(((CancellationToken)Get(cancelled, "Token")!).IsCancellationRequested && Result() == "RateLimited",
+            "cancel leaves the last result without counting a new failure");
+        object current = Begin("Manual")!;
+        Fail(cancelled, "AccessRequired", 403);
+        Check((bool)Invoke(refresh, "Accepts", current) && Result() == "RateLimited", "late HTTP error rejected");
+        Fail(current, "LoginRequired", 401);
+        Check(Next() == null && Begin("Manual") == null && Begin() == null, "login suspends background and tray navigation");
+        Fail(Begin("Page", visible: true)!, "AccessRequired", 403);
+        Check(Next() == null && (string?)Get(Describe(at), "ShortStatus") == "접근 확인", "access has its own blocked state");
+        Fail(Begin("Connection", visible: true)!, "ResponseFormat", 200);
+        Check(Next() == clock.GetUtcNow().AddMinutes(2) && Begin() == null, "format allows one delayed retry");
+        clock.Advance(120);
+        Fail(Begin()!, "ResponseRange", 200);
+        Check(Next() == null && Begin() == null && Begin("Manual") == null, "range belongs to the same retry budget");
+
+        object parser = New("Services.ClaudeWebUsageParser");
+        object Parse(string input)
+        {
+            using var document = JsonDocument.Parse(input);
+            return Invoke(parser, "Parse", document.RootElement, clock.GetUtcNow());
+        }
+        foreach ((string payload, string expected) in new[] {
+            ("{}", "ResponseFormat"), ("{\"five_hour\":{\"utilization\":101}}", "ResponseRange"),
+            ("{\"five_hour\":{\"utilization\":0,\"resets_at\":\"bad\"}}", "ResponseFormat") })
+        {
+            try { Parse(payload); Check(false, "invalid usage accepted"); }
+            catch (TargetInvocationException exception)
+            {
+                Check(Get(exception.InnerException!, "Result")!.ToString() == expected, "parser rejection " + expected);
+            }
+        }
+        object cache = Parse("{\"five_hour\":{\"utilization\":100},\"seven_day\":null,\"fixture_private\":\"omit\"}");
+        object snapshot = Invoke(cache, "ToSnapshot", "Claude Web");
+        Check((double)Get(Get(cache, "FiveHour")!, "RemainingPercent")! == 0d && Get(cache, "SevenDay") == null,
+            "actual remaining zero distinct from unprovided weekly window");
+        Invoke(refresh, "RestoreCache", snapshot, false);
+        Check(Result() == "ResponseRange" && !(bool)Get(Describe(clock.GetUtcNow()), "IsCurrent")!, "reread cannot clear failure");
+        object readFailure = New("Services.ClaudeRefreshCoordinator", clock, null);
+        string brokenPath = Path.Combine(_root, "claude-broken-cache.json");
+        File.WriteAllText(brokenPath, "{bad");
+        object badStore = New("Services.ClaudeUsageStore", brokenPath);
+        try
+        {
+            ((Task)Invoke(badStore, "ReadWebAsync", CancellationToken.None)).GetAwaiter().GetResult();
+            Check(false, "malformed local cache accepted");
+        }
+        catch (JsonException)
+        {
+            Invoke(readFailure, "RestoreCache", null, true);
+        }
+        Check(Get(Get(readFailure, "State")!, "Result")!.ToString() == "StorageRead", "local read failure classified separately");
+
+        object page = Begin("Page", visible: true)!;
+        object binding = New("UI.ClaudePageAttempt", page);
+        IList requests = (IList)Get(binding, "Requests")!;
+        foreach ((string id, string loader, string frame) in new[] {
+            ("old", "previous", "main"), ("foreign", "active", "child"), ("first", "active", "main"), ("later", "active", "main") })
+        {
+            requests.Add(New("UI.ClaudePageRequest", id, loader, frame, "fixture"));
+        }
+        Check(Invoke(binding, "SelectRequest") == null, "cannot accept response before navigation identity is known");
+        binding.GetType().GetProperty("Loader")!.SetValue(binding, "active");
+        binding.GetType().GetProperty("Frame")!.SetValue(binding, "main");
+        Check((string?)Get(Invoke(binding, "SelectRequest"), "Id") == "first", "only first matching main document request wins, not old or faster responses");
+
+        string path = Path.Combine(_root, "claude-synthetic.json");
+        object store = New("Services.ClaudeUsageStore", path);
+        object earlierCache = Parse("{\"five_hour\":{\"utilization\":40}}");
+        ((Task)Invoke(store, "SaveAsync", earlierCache, (Action<Action>)(replace => replace()), CancellationToken.None))
+            .GetAwaiter().GetResult();
+        string normalFile = File.ReadAllText(path);
+        Task Save(object attempt) => (Task)Invoke(store, "SaveAsync", cache,
+            (Action<Action>)(replace => Invoke(refresh, "Commit", attempt, cache, replace)), CancellationToken.None);
+        Save(cancelled).GetAwaiter().GetResult();
+        Check(File.ReadAllText(path) == normalFile, "late success cannot replace existing file");
+        using (var locked = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            try { Save(page).GetAwaiter().GetResult(); Check(false, "locked destination was replaced"); }
+            catch (TargetInvocationException exception) when (exception.InnerException is IOException or UnauthorizedAccessException)
+            { Fail(page, "StorageWrite", 200); }
+        }
+        Check(Result() == "StorageWrite" && File.ReadAllText(path) == normalFile, "write failure preserves the file and doesn't record success");
+        object recovered = Begin("Manual")!;
+        Save(recovered).GetAwaiter().GetResult();
+        Check(Result() == "Success" && (int)Get(State(), "Failures")! == 0 && Next() == clock.GetUtcNow().AddSeconds(60), "stored response alone restores normal 60-second interval");
+        Check(!File.ReadAllText(path).Contains("fixture_private"), "only normalized fields persisted");
+        Check((bool)Get(Describe(clock.GetUtcNow().AddMinutes(15)), "IsCurrent")! &&
+              (string?)Get(Describe(clock.GetUtcNow().AddMinutes(15).AddTicks(1)), "ShortStatus") == "갱신 지연", "15-minute freshness boundary");
+        object laterAttempt = Begin("Manual")!;
+        Check((string?)Get(Describe(clock.GetUtcNow()), "PreviousMark") == "↻", "active values visibly marked previous");
+        Fail(laterAttempt, "ServerError", 503);
+        Check((string?)Get(Describe(clock.GetUtcNow()), "PreviousMark") == "!", "fresh previous value on transient failure");
+        laterAttempt = Begin("Manual")!;
+        Invoke(refresh, "Stop");
+        Fail(laterAttempt, "NetworkFailed");
+        Save(laterAttempt).GetAwaiter().GetResult();
+        Check(Result() == "ServerError" && Get(State(), "Phase")!.ToString() == "Stopped" && Begin("Connection") == null,
+            "shutdown rejects late success, error and restart");
+
+        string diagnosticPath = Path.Combine(_root, "claude-diagnostic.json");
+        object diagnostics = New("Services.ClaudeRefreshDiagnostics", diagnosticPath, clock);
+        for (int index = 0; index < 105; index++)
+        {
+            Invoke(diagnostics, "Record", New("Services.ClaudeRefreshDiagnostic", clock.GetUtcNow(),
+                ClaudeEnum("Phase", "Idle"), ClaudeEnum("Result", "NetworkFailed"), null, 22L, index));
+        }
+        ((Task)Invoke(diagnostics, "FlushAsync")).GetAwaiter().GetResult();
+        using (var journal = JsonDocument.Parse(File.ReadAllBytes(diagnosticPath)))
+        {
+            Check(new FileInfo(diagnosticPath).Length <= 65536 && journal.RootElement.GetArrayLength() == 100 &&
+                 journal.RootElement[0].EnumerateObject().Count() == 6, "diagnostic caps and allowlisted fields");
+        }
+        clock.Advance(86400);
+        Invoke(diagnostics, "Maintain");
+        ((Task)Invoke(diagnostics, "FlushAsync")).GetAwaiter().GetResult();
+        Check(File.ReadAllText(diagnosticPath) == "[]", "diagnostics pruned at 24 hours");
+        object blockedDiagnostics = New("Services.ClaudeRefreshDiagnostics", Path.Combine(path, "not-a-directory.json"), clock);
+        Invoke(blockedDiagnostics, "Record", New("Services.ClaudeRefreshDiagnostic", clock.GetUtcNow(),
+            ClaudeEnum("Phase", "Idle"), ClaudeEnum("Result", "Stopped"), null, 0L, 0));
+        ((Task)Invoke(blockedDiagnostics, "FlushAsync")).GetAwaiter().GetResult();
+        Check(!File.Exists(Path.Combine(path, "not-a-directory.json")), "diagnostic storage errors remain best-effort");
+    }
     private static object Evaluate(object? snapshot, DateTimeOffset? now = null, string? error = null,
                                    bool stale = false) =>
         Static("Services.UsagePacingAdvisor", "Evaluate", snapshot, error, stale, now ?? Start);
@@ -746,7 +930,7 @@ internal static class PacingProbe
         object bar = New("UI.TopUsageBar");
         try
         {
-            Invoke(popup, "SetState", snapshot, false, null, null, null, false, advice, unavailable);
+            Invoke(popup, "SetState", snapshot, false, null, null, null, false, advice, unavailable, null);
             using JsonDocument payload = JsonDocument.Parse(JsonSerializer.Serialize(Invoke(popup, "BuildDocumentState")));
             JsonElement provider = payload.RootElement.GetProperty("providers")[0];
             JsonElement pacing = provider.GetProperty("pacing");
@@ -763,14 +947,14 @@ internal static class PacingProbe
             foreach (double remaining in new[] { double.NaN, double.PositiveInfinity, -1, 101 })
             {
                 object invalid = Sample(remaining);
-                Invoke(popup, "SetState", invalid, false, null, null, null, false, Evaluate(invalid), unavailable);
+                Invoke(popup, "SetState", invalid, false, null, null, null, false, Evaluate(invalid), unavailable, null);
                 using JsonDocument invalidPayload = JsonDocument.Parse(JsonSerializer.Serialize(Invoke(popup, "BuildDocumentState")));
                 JsonElement invalidWindow = invalidPayload.RootElement.GetProperty("providers")[0].GetProperty("windows")[0];
                 Check(invalidWindow.GetProperty("remaining").ValueKind == JsonValueKind.Null && invalidWindow.GetProperty("invalid").GetBoolean() &&
                       invalidWindow.GetProperty("average24Hours").ValueKind == JsonValueKind.Null, "invalid values serialize unknown");
                 DateTimeOffset realNow = DateTimeOffset.UtcNow;
                 object freshInvalid = Snapshot(realNow, Bucket("a", Window(remaining, 10080, realNow.AddDays(2))));
-                Check((string)Get(Invoke(bar, "CreateMetric", "Codex", freshInvalid, null, false), "Value")! == "확인 필요", "invalid top metric unknown");
+                Check((string)Get(Invoke(bar, "CreateMetric", "Codex", freshInvalid, null, false, null), "Value")! == "확인 필요", "invalid top metric unknown");
             }
             foreach ((double remaining, double hours, string expected) in new[] {
                 (76d, 24d, "초기화까지 남은 76%를 나눠 쓰세요"),
@@ -778,7 +962,7 @@ internal static class PacingProbe
             {
                 object fixture = Snapshot(Start, Bucket("a", Window(remaining, 10080, Start.AddHours(hours))));
                 object fixtureAdvice = Evaluate(fixture);
-                Invoke(popup, "SetState", fixture, false, null, null, null, false, fixtureAdvice, unavailable);
+                Invoke(popup, "SetState", fixture, false, null, null, null, false, fixtureAdvice, unavailable, null);
                 using JsonDocument fixturePayload = JsonDocument.Parse(JsonSerializer.Serialize(Invoke(popup, "BuildDocumentState")));
                 string row = fixturePayload.RootElement.GetProperty("providers")[0].GetProperty("windows")[0]
                     .GetProperty("pacingMessage").GetString()!;
@@ -786,7 +970,7 @@ internal static class PacingProbe
             }
             object claude = Snapshot(Start, Bucket("claude", Window(100, 300),
                 Window(94, 10080, DateTimeOffset.Parse("2026-11-15T12:00:00+09:00"))));
-            Invoke(popup, "SetState", snapshot, false, null, claude, null, false, advice, Evaluate(claude));
+            Invoke(popup, "SetState", snapshot, false, null, claude, null, false, advice, Evaluate(claude), null);
             using JsonDocument both = JsonDocument.Parse(JsonSerializer.Serialize(Invoke(popup, "BuildDocumentState")));
             _document = both.RootElement.GetRawText();
             JsonElement[] windows = both.RootElement.GetProperty("providers")[1].GetProperty("windows").EnumerateArray().ToArray();
@@ -804,7 +988,7 @@ internal static class PacingProbe
             object dailyClaude = Snapshot(DailyStart.AddHours(1), Bucket("claude", Window(100, 300),
                 Window(92, 10080, DateTimeOffset.Parse("2026-11-15T12:00:00+09:00"))));
             object claudeDailyAdvice = ApplyDaily(dailyTracker, dailyClaude, DailyStart.AddHours(1), "claude");
-            Invoke(popup, "SetState", dailySnapshot, false, null, dailyClaude, null, false, dailyAdvice, claudeDailyAdvice);
+            Invoke(popup, "SetState", dailySnapshot, false, null, dailyClaude, null, false, dailyAdvice, claudeDailyAdvice, null);
             _dailyDocument = JsonSerializer.Serialize(Invoke(popup, "BuildDocumentState"));
             using (JsonDocument dailyPayload = JsonDocument.Parse(_dailyDocument))
             {
@@ -831,8 +1015,31 @@ internal static class PacingProbe
             ApplyDaily(tomorrowTracker, DailySnapshot(DailyStart, 40), DailyStart, "claude");
             object tomorrowClaude = DailySnapshot(DailyStart.AddHours(1), 30.5);
             object tomorrowClaudeAdvice = ApplyDaily(tomorrowTracker, tomorrowClaude, DailyStart.AddHours(1), "claude");
-            Invoke(popup, "SetState", tomorrowSnapshot, false, null, tomorrowClaude, null, false, tomorrowAdvice, tomorrowClaudeAdvice);
+            Invoke(popup, "SetState", tomorrowSnapshot, false, null, tomorrowClaude, null, false, tomorrowAdvice, tomorrowClaudeAdvice, null);
             _tomorrowDocument = JsonSerializer.Serialize(Invoke(popup, "BuildDocumentState"));
+            DateTimeOffset received = DateTimeOffset.UtcNow.AddSeconds(-1);
+            object exhausted = Snapshot(received, Bucket("claude", Window(0, 300, received.AddHours(1)),
+                Window(93, 10080, received)));
+            object claudeState = New("Models.ClaudeRefreshState", ClaudeEnum("Phase", "Idle"),
+                ClaudeEnum("Result", "NetworkFailed"), exhausted, received.AddSeconds(30), null, 1);
+            object previous = Static("UI.UsageDisplayHelper", "DescribeClaude", claudeState, received);
+            using (var claudeBar = (Form)New("UI.TopUsageBar"))
+            {
+                object metric = Invoke(claudeBar, "CreateMetric", "Claude", exhausted, null, true, previous);
+                Check((string?)Get(metric, "Value") == "0% !", "summary marks the valid exhausted previous value");
+                object expired = Snapshot(received, Bucket("claude", Window(0, 300, received)));
+                metric = Invoke(claudeBar, "CreateMetric", "Claude", expired, null, true, previous);
+                Check((string?)Get(metric, "Value") == "갱신 중", "summary doesn't display reset value as zero");
+            }
+            Invoke(popup, "SetState", tomorrowSnapshot, false, null, exhausted, null, true, tomorrowAdvice,
+                Evaluate(exhausted, received, stale: true), previous);
+            _claudeStatusDocument = JsonSerializer.Serialize(Invoke(popup, "BuildDocumentState"));
+            using (JsonDocument statusPayload = JsonDocument.Parse(_claudeStatusDocument))
+            {
+                JsonElement provider = statusPayload.RootElement.GetProperty("providers")[1];
+                Check(provider.GetProperty("previous").GetBoolean() && !provider.GetProperty("canConnect").GetBoolean() &&
+                      provider.GetProperty("windows")[0].GetProperty("alert").GetString() == "none", "previous value has no reconnect or new exhaustion alert");
+            }
             using (JsonDocument tomorrowPayload = JsonDocument.Parse(_tomorrowDocument))
             {
                 JsonElement[] rows = tomorrowPayload.RootElement.GetProperty("providers")[0].GetProperty("windows")
@@ -914,7 +1121,14 @@ internal static class PacingProbe
                     Check(await ScriptBool(browser, "document.body.innerText.includes('100%') && document.body.innerText.includes('94%') && document.body.innerText.includes('추천 페이스: 24시간에 약16.37%') && document.querySelectorAll('.uv-weekly-status').length===1"), "Claude independent short/weekly rendered " + width);
                     Check(await ScriptBool(browser, "[...document.querySelectorAll('.uv-limit,.uv-line')].every(e=>e.scrollWidth<=e.clientWidth+1)"), "Claude rows fit " + width);
                 }
-                await browser.ExecuteScriptAsync("document.querySelector('summary').click();");
+                await browser.ExecuteScriptAsync("window.claudeFixture=" + _claudeStatusDocument + ";");
+                foreach ((int width, bool both, bool docked) in new[] { (264, false, true), (280, false, false), (320, true, false) })
+                {
+                    host.ClientSize = new Size(width, 1000);
+                    await browser.ExecuteScriptAsync($"claudeFixture.showBoth={both.ToString().ToLowerInvariant()};claudeFixture.docked={docked.ToString().ToLowerInvariant()};claudeFixture.activeProvider='claude';usageViewer.update(claudeFixture);");
+                    Check(await ScriptBool(browser, "document.body.innerText.includes('이전 값 · 일시 오류') && document.body.innerText.includes('0%') && document.body.innerText.includes('초기화 후 새 값 확인 중') && document.documentElement.scrollWidth<=innerWidth && document.querySelector('.uv-provider-status').scrollWidth<=document.querySelector('.uv-provider-status').clientWidth+1"), "Claude status, previous zero and expired row fit " + width);
+                }
+                await browser.ExecuteScriptAsync("usageViewer.update(fixture);document.querySelector('summary').click();");
                 await Task.Delay(50);
                 Check(await ScriptBool(browser, "document.querySelector('details').open && document.body.innerText.includes('5시간 한도는 따로')"), "help expands with separate limit explanation");
                 await browser.ExecuteScriptAsync("usageViewer.update(fixture);");
@@ -996,6 +1210,16 @@ internal static class PacingProbe
 internal sealed class CheckException(string message) : Exception(message)
 {
 }
+
+internal sealed class ClaudeFixtureClock : TimeProvider
+{
+    private readonly DateTimeOffset _start = new DateTimeOffset(2026, 11, 19, 0, 0, 0, TimeSpan.Zero);
+    private long _ticks;
+    public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+    public override long GetTimestamp() => _ticks;
+    public override DateTimeOffset GetUtcNow() => _start.AddTicks(_ticks);
+    public void Advance(int seconds) => _ticks += seconds * TimeSpan.TicksPerSecond;
+}
 '@
 $artifactRoot = Join-Path $repoRoot '.artifacts'
 $tempRoot = Join-Path $artifactRoot ('UsagePacing-' + [guid]::NewGuid().ToString('N'))
@@ -1031,7 +1255,9 @@ try {
         $compilerOutput | ForEach-Object { $_.ToString().Replace($tempRoot, '<fixture>') }
         throw 'Could not compile the synthetic driver.'
     }
-    & $DotNetPath exec --runtimeconfig (Join-Path $buildPath 'UsageViewer.runtimeconfig.json') $probePath $assemblyPath $tempRoot
+    $probeArguments = @($assemblyPath, $tempRoot)
+    if ($ClaudeRefreshOnly) { $probeArguments += 'claude-refresh' }
+    & $DotNetPath exec --runtimeconfig (Join-Path $buildPath 'UsageViewer.runtimeconfig.json') $probePath @probeArguments
     if ($LASTEXITCODE -ne 0) { throw 'Synthetic usage-pacing checks failed.' }
 }
 finally {

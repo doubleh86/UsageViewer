@@ -78,7 +78,7 @@ internal sealed class TopUsageBar : Form
     }
 
     public void SetUsage(IReadOnlyList<DetectedAiApp> installed, UsageSnapshot? codex, string? codexError,
-                         UsageSnapshot? claude, string? claudeError, bool claudeStale)
+                         UsageSnapshot? claude, string? claudeError, bool claudeStale, ClaudeUsageDisplay? claudeWeb = null)
     {
         _metrics.Clear();
         _alertLevels.Clear();
@@ -89,9 +89,9 @@ internal sealed class TopUsageBar : Form
             _metrics.Add(CreateMetric("Codex", codex, codexError, false));
         }
 
-        if (claude != null || installed.Any(app => app.Id == "claude") == true)
+        if (claudeWeb != null || claude != null || installed.Any(app => app.Id == "claude") == true)
         {
-            _metrics.Add(CreateMetric("Claude", claude, claudeError, claudeStale));
+            _metrics.Add(CreateMetric("Claude", claude, claudeError, claudeStale, claudeWeb));
         }
 
         AccessibleName = _metrics.Count == 0 ? "사용량 조회 대기" :
@@ -128,8 +128,14 @@ internal sealed class TopUsageBar : Form
         Close();
     }
 
-    private TopBarMetric CreateMetric(string provider, UsageSnapshot? snapshot, string? error, bool stale)
+    private TopBarMetric CreateMetric(string provider, UsageSnapshot? snapshot, string? error, bool stale,
+                                      ClaudeUsageDisplay? claudeWeb = null)
     {
+        if (claudeWeb?.ShortStatus is string status)
+        {
+            return new TopBarMetric(provider, "", status, true);
+        }
+
         if (snapshot == null)
         {
             string missing = provider == "Claude" ? "연결 필요" : error == null ? "조회 대기" : "조회 실패";
@@ -137,8 +143,8 @@ internal sealed class TopUsageBar : Form
             return new TopBarMetric(provider, "", missing, true);
         }
 
-        if (stale == true || error != null || snapshot.RetrievedAt > DateTimeOffset.UtcNow ||
-            DateTimeOffset.UtcNow - snapshot.RetrievedAt > TimeSpan.FromMinutes(15))
+        if (ClaudeRefreshPolicy.IsFresh(snapshot, DateTimeOffset.UtcNow) == false ||
+            (claudeWeb == null && (stale == true || error != null)))
         {
             return new TopBarMetric(provider, "", "갱신 필요", true);
         }
@@ -158,13 +164,16 @@ internal sealed class TopUsageBar : Form
         }
         if (window == null)
         {
-            return new TopBarMetric(provider, "", windows.Count == 0 ? "한도 미제공" : "갱신 필요", true);
+            return new TopBarMetric(provider, "", windows.Count == 0 ? "한도 미제공" :
+                                    claudeWeb != null ? "갱신 중" : "갱신 필요", true);
         }
 
         string period = window.DurationMinutes == 10080 ? "주간" :
                         window.DurationMinutes is int minutes && minutes % 60 == 0 ? $"{minutes / 60}h" : "한도";
 
-        return new TopBarMetric(provider, period, UsageDisplayHelper.FormatPercent(window.RemainingPercent), false);
+        string? mark = claudeWeb?.PreviousMark;
+        string value = UsageDisplayHelper.FormatPercent(window.RemainingPercent) + (mark == null ? "" : " " + mark);
+        return new TopBarMetric(provider, period, value, mark != null);
     }
 
     private Screen GetDockScreen()

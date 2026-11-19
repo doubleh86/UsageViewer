@@ -9,7 +9,7 @@ using UsageViewer.Services;
 namespace UsageViewer.UI;
 
 internal sealed record ProviderUsageState(string Name, UsageSnapshot? Snapshot, string? Error, bool IsStale = false,
-                                          UsagePacingAdvice? Advice = null);
+                                          UsagePacingAdvice? Advice = null, ClaudeUsageDisplay? ClaudeWeb = null);
 
 internal sealed class UsagePopup : Form
 {
@@ -70,10 +70,11 @@ internal sealed class UsagePopup : Form
 
     public void SetState(UsageSnapshot? snapshot, bool refreshing, string? error, UsageSnapshot? claude = null,
                          string? claudeError = null, bool claudeStale = false,
-                         UsagePacingAdvice? codexAdvice = null, UsagePacingAdvice? claudeAdvice = null)
+                         UsagePacingAdvice? codexAdvice = null, UsagePacingAdvice? claudeAdvice = null,
+                         ClaudeUsageDisplay? claudeWeb = null)
     {
         _codex = new ProviderUsageState("Codex", snapshot, error, Advice: codexAdvice);
-        _claude = new ProviderUsageState("Claude", claude, claudeError, claudeStale, claudeAdvice);
+        _claude = new ProviderUsageState("Claude", claude, claudeError, claudeStale, claudeAdvice, claudeWeb);
         _refreshing = refreshing;
         UpdateDocument();
     }
@@ -324,7 +325,7 @@ internal sealed class UsagePopup : Form
             visible.Insert(0, new DetectedAiApp("codex", "Codex", true));
         }
 
-        if (_claude.Snapshot != null && visible.Any(app => app.Id == "claude") == false)
+        if ((_claude.Snapshot != null || _claude.ClaudeWeb != null) && visible.Any(app => app.Id == "claude") == false)
         {
             visible.Add(new DetectedAiApp("claude", "Claude", true));
         }
@@ -333,6 +334,7 @@ internal sealed class UsagePopup : Form
         foreach (DetectedAiApp app in visible)
         {
             ProviderUsageState state = app.Id == "codex" ? _codex : _claude;
+            ClaudeUsageDisplay? claudeWeb = app.Id == "claude" ? state.ClaudeWeb : null;
             UsageSnapshot? snapshot = app.UsageSupported == true ? state.Snapshot : null;
             UsagePacingAdvice advice = state.Advice ?? new UsagePacingAdvice(UsagePacingLevel.Unavailable);
             List<object> windows = new List<object>();
@@ -390,7 +392,8 @@ internal sealed class UsagePopup : Form
                 id = app.Id,
                 name = app.Name,
                 supported = app.UsageSupported,
-                canConnect = (app.Id == "codex" || app.Id == "claude") && (snapshot == null || state.Error != null),
+                canConnect = claudeWeb?.CanConnect ?? ((app.Id == "codex" || app.Id == "claude") &&
+                             (snapshot == null || state.Error != null)),
                 plan = app.Id == "codex" ? CultureInfo.InvariantCulture.TextInfo.ToTitleCase(snapshot?.PlanName ??
                        (state.Error == null ? "조회 중" : "연결 확인")) :
                        app.Id == "claude" ? (snapshot == null ? "연결 필요" : "마지막 수신") : "감지됨",
@@ -405,6 +408,9 @@ internal sealed class UsagePopup : Form
                     basis = UsageDisplayHelper.FormatPacingBasis(advice)
                 },
                 credits = balance,
+                status = claudeWeb?.Detail,
+                previous = claudeWeb?.IsCurrent == false && snapshot != null,
+                web = claudeWeb != null,
                 error = app.UsageSupported == true ? state.Error : "감지됨 · 사용량 연동 미지원",
                 stale = app.UsageSupported == true && (state.IsStale == true || state.Error != null ||
                         (snapshot != null && (snapshot.RetrievedAt > DateTimeOffset.UtcNow ||
