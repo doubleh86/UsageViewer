@@ -19,11 +19,15 @@ function check(value, name) { assert.ok(value, name); passed++; }
 function block(source, start, end) { return source.slice(source.indexOf(start), source.indexOf(end)); }
 const request = block(tray, 'private Task RequestRefreshAsync', 'private Task RefreshCodexAsync');
 const tick = block(tray, '_timer.Tick +=', '// Ensure an invokable UI handle');
+const startup = block(tray, 'Task codexRefresh = RefreshCodexAsync();', 'if (showOnStart == true)');
 const codex = block(tray, 'private async Task RefreshCoreAsync', 'private void ApplyWindowPreferences');
 check((tray.match(/await RequestRefreshAsync\(\)/g) || []).length === 2 && request.includes('RefreshCodexAsync()') &&
     request.includes('RefreshAsync(ClaudeRefreshTrigger.Manual)'), 'tray and popup manual refresh use one guarded Claude flow');
 check(tick.includes('RefreshCodexAsync()') && tick.includes('RefreshAsync(ClaudeRefreshTrigger.Automatic)') &&
     !/await.*Claude/.test(tick + request + codex) && codex.includes('_client.ReadAsync'), 'Codex refresh independent of Claude');
+check(startup.includes('Directory.Exists(profile) == true') && startup.includes('RefreshAsync(ClaudeRefreshTrigger.Automatic)') &&
+    startup.includes('_ = LoadClaudeWebCacheAsync();') && !startup.includes('await '),
+    'startup schedules Codex, linked Claude and cache restore without waiting for any of them');
 check(/_active != null.*ServerNotBefore > Now/.test(coordinator) && coordinator.includes('&& interactive == true'), 'duplicate, server and visible interaction gates');
 check(/InitializationTimeout = TimeSpan.FromSeconds\(60\)/.test(policy) && /AttemptTimeout = TimeSpan.FromSeconds\(30\)/.test(policy) &&
     coordinator.includes('GetElapsedTime(_phaseStarted)'), 'separate elapsed deadlines');
@@ -36,16 +40,22 @@ check(connection.includes('uri.AbsolutePath is "/settings" or "/settings/"') && 
     'only the bound explicit attempt waits on the exact settings bootstrap');
 const routeChange = block(connection, 'private void OnWithinDocument', 'private void InspectDocument');
 const requestEvent = block(connection, 'private void OnRequest', 'private void OnResponse');
+const responseEvent = block(connection, 'private void OnResponse', 'private void InspectDocumentResponse');
 const newRoute = block(connection, 'private static bool IsNewPage', 'private static ClaudeRefreshRoute GetRefreshRoute');
 check(/IsOfficial\(url, out Uri uri\) == true &&\s*uri.AbsolutePath == "\/new" && uri.Query.Length == 0;/.test(newRoute) &&
     routeChange.includes('IsNewPage(url) == true') &&
     routeChange.includes('_documentUrl == UsageUrl') && routeChange.includes('_documentFrame') &&
     routeChange.includes('Visible == true') && routeChange.includes('ClaudeRefreshTrigger.Automatic or ClaudeRefreshTrigger.Manual') &&
     routeChange.includes('_refresh.Accepts(pageAttempt.Attempt)'), 'only hidden app attempts can recover from the exact same-document move');
-check(routeChange.includes('request.DocumentUrl == UsageUrl') && routeChange.includes('uri.Query.Length == 0') &&
+check(routeChange.includes('request.DocumentUrl == UsageUrl') && !routeChange.includes('.Query') &&
     routeChange.includes('Requests.RemoveAll') && routeChange.includes('Requests.Count > 0') &&
     requestEvent.includes('pageAttempt.Draining == false') && requestEvent.includes('!= "GET"') &&
-    connection.includes('string.IsNullOrEmpty(args.SessionId) == false'), 'only pre-registered top-session GET candidates are frozen');
+    requestEvent.includes('IsUsageEndpoint(url) == false') && requestEvent.includes('IsUsagePage(documentUrl) == false') &&
+    connection.includes('string.IsNullOrEmpty(args.SessionId) == false'), 'freeze pre-registered top-session GETs with or without a query');
+check(requestEvent.includes('new ClaudePageRequest(id, loader, frame, url!)') && responseEvent.includes('FindRequest(item)') &&
+    connection.includes('Requests.Find(request => request.Id == id)') && responseEvent.includes('ReadString(response, "url") != request.Url') &&
+    responseEvent.includes('ReadString(item, "loaderId") != request.Loader') && responseEvent.includes('frame != request.Frame'),
+    'keep exact registered identity and full response URL comparison');
 check(connection.includes('newDocument: true') && connection.includes('Visible == false && IsNewPage(_documentUrl) == true') &&
     connection.includes('CancelInflight();'), 'draining cannot continue after a new document or user interaction');
 const dispatch = block(connection, 'private void Dispatch', 'private async Task ReadAndSaveAsync');

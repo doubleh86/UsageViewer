@@ -1070,11 +1070,12 @@ internal static class PacingProbe
         Check(html.Contains("data-action=\"hide\"") && html.Contains("e.key==='Escape'") && html.Contains("id=\"show-both\"") && html.Contains("크레딧"), "existing controls retained");
     }
 
-    private static async Task CheckClaudeNavigationAsync()
+    private static async Task CheckClaudeNavigationAsync(bool restart)
     {
         const string origin = "https://claude.ai";
         const string usage = "/settings/usage";
         const string endpoint = "/api/organizations/fixture/usage";
+        const string usageQuery = "?fixture=sample";
         TimeSpan limit = TimeSpan.FromSeconds(10);
         var clock = new ClaudeFixtureClock();
         string cachePath = Path.Combine(_root, "navigation-cache.json");
@@ -1087,7 +1088,7 @@ internal static class PacingProbe
             .GetValue(window)!;
         var options = new CoreWebView2EnvironmentOptions("--disable-background-networking --no-first-run " +
             "--no-proxy-server --host-resolver-rules=\"MAP * ~NOTFOUND\"");
-        string profile = Path.Combine(_root, "navigation-profile");
+        string profile = Path.Combine(_root, restart ? "restart-profile" : "navigation-profile");
         var environment = await CoreWebView2Environment.CreateAsync(null, profile, options)
             .WaitAsync(TimeSpan.FromSeconds(30));
         Check(string.Equals(environment.UserDataFolder, profile, StringComparison.OrdinalIgnoreCase),
@@ -1122,7 +1123,7 @@ internal static class PacingProbe
                     headers += "\r\nLocation: " + redirect;
                 }
                 else if (args.Request.Uri is "https://outside.invalid/api/organizations/fixture/usage" ||
-                         args.Request.Uri == origin + endpoint || args.Request.Uri == origin + endpoint + "?fixture" ||
+                         args.Request.Uri == origin + endpoint || args.Request.Uri == origin + endpoint + usageQuery ||
                          args.Request.Uri == origin + endpoint + "/other")
                 {
                     status = endpointStatus;
@@ -1162,17 +1163,18 @@ internal static class PacingProbe
                     deferral?.Complete();
                 }
             };
-            await ((Task)Invoke(window, "ObserveNavigationAsync")).WaitAsync(limit);
-
             object State() => Get(refresh, "State")!;
             string Result() => Get(State(), "Result")!.ToString()!;
             bool Active() => Get(refresh, "Active") != null;
             int successes = 0;
+            object? lastSuccessfulSnapshot = null;
             EventInfo changedEvent = refresh.GetType().GetEvent("Changed")!;
             changedEvent.AddEventHandler(refresh, (EventHandler)((_, _) =>
             {
-                if (!Active() && Result() == "Success")
+                object? snapshot = Get(State(), "Snapshot");
+                if (!Active() && Result() == "Success" && !ReferenceEquals(snapshot, lastSuccessfulSnapshot))
                 {
+                    lastSuccessfulSnapshot = snapshot;
                     successes++;
                 }
             }));
@@ -1313,36 +1315,173 @@ internal static class PacingProbe
                 return pending;
             }
 
+            async Task VerifyStartupRecovery()
+            {
+                async Task<object> ReadSavedSnapshot()
+                {
+                    Task read = (Task)Invoke(store, "ReadWebAsync", CancellationToken.None);
+                    await read.WaitAsync(limit);
+                    return Get(read, "Result")!;
+                }
+
+                clock.Advance(7200);
+                string previous = File.ReadAllText(cachePath);
+                DateTimeOffset lastReceipt = default;
+                var initialized = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                window.GetType().GetField("_initialization", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .SetValue(window, initialized.Task);
+                await Navigate(async () =>
+                {
+                    Task automatic = StartRefresh("Automatic");
+                    Check(!window.Visible && Get(State(), "Phase")!.ToString() == "Initializing",
+                        "startup starts automatically while the new window is hidden");
+                    object restored = await ReadSavedSnapshot();
+                    lastReceipt = (DateTimeOffset)Get(restored, "RetrievedAt")!;
+                    Invoke(refresh, "RestoreCache", restored, false);
+                    Check(lastReceipt < clock.GetUtcNow().AddMinutes(-15) && Result() == "Waiting" && successes == 0 &&
+                        ReferenceEquals(Get(State(), "Snapshot"), restored) && File.ReadAllText(cachePath) == previous,
+                        "startup restores an old normalized snapshot without declaring success");
+                    await ((Task)Invoke(window, "ObserveNavigationAsync")).WaitAsync(limit);
+                    initialized.SetResult(true);
+                    await automatic;
+                }, new Uri(origin + usage));
+
+                async Task CommitDelayedQuery(int utilization)
+                {
+                    used = utilization;
+                    int before = successes;
+                    Task<string> pending = await HoldUsageReply(url: origin + endpoint + usageQuery);
+                    await SameDocument("/new#fixture");
+                    Check(Active() && File.ReadAllText(cachePath) == previous,
+                        "startup or scheduled refresh keeps the previous cache until the delayed reply");
+                    releaseReply.SetResult(true);
+                    Check(await pending == "200", "the browser completes the registered delayed request");
+                    await AwaitAttemptEnd();
+                    object saved = await ReadSavedSnapshot();
+                    DateTimeOffset received = (DateTimeOffset)Get(saved, "RetrievedAt")!;
+                    object bucket = ((Array)Get(saved, "Buckets")!).GetValue(0)!;
+                    string contents = File.ReadAllText(cachePath);
+                    Check(Result() == "Success" && successes == before + 1 && received > lastReceipt && received == clock.GetUtcNow() &&
+                        (double)Get(Get(bucket, "Primary")!, "UsedPercent")! == utilization && contents != previous &&
+                        !contents.Contains("fixture_private") &&
+                        (DateTimeOffset?)Get(Get(State(), "Snapshot")!, "RetrievedAt") == received,
+                        "one successful cache replacement records the new normalized use and receipt time");
+                    Check((DateTimeOffset?)Get(State(), "NextAttempt") == received.AddSeconds(60) &&
+                        (int)Get(State(), "Failures")! == 0, "success schedules the next automatic refresh at the normal interval");
+                    lastReceipt = received;
+                    previous = contents;
+                }
+
+                await CommitDelayedQuery(21);
+                foreach (int utilization in new[] { 32, 43 })
+                {
+                    clock.Advance(59);
+                    object? loader = WindowField("_documentLoader");
+                    await StartRefresh("Automatic");
+                    Check(Equals(loader, WindowField("_documentLoader")), "automatic refresh cannot navigate before its due time");
+                    CheckCacheUnchanged(previous, "Success");
+                    clock.Advance(1);
+                    await NavigateUsage("Automatic");
+                    await CommitDelayedQuery(utilization);
+                }
+
+                clock.Advance(60);
+                await NavigateUsage("Automatic");
+                Task<string> late = await HoldUsageReply(url: origin + endpoint + usageQuery);
+                await SameDocument("/new#fixture");
+
+                object preferences = New("Services.PopupPreferencesStore", Path.Combine(_root, "restart-view.json"));
+                using Form popup = (Form)New("UI.UsagePopup", preferences, Path.Combine(_root, "restart-popup-profile"));
+                void VerifyCodexDisplay(double remaining)
+                {
+                    object codex = Snapshot(clock.GetUtcNow(), Bucket("synthetic-codex", Window(remaining)));
+                    object display = Static("UI.UsageDisplayHelper", "DescribeClaude", State(), clock.GetUtcNow())!;
+                    Invoke(popup, "SetState", codex, false, null, Get(State(), "Snapshot"), null, true, null, null, display);
+                    using JsonDocument payload = JsonDocument.Parse(JsonSerializer.Serialize(Invoke(popup, "BuildDocumentState")));
+                    JsonElement codexRow = payload.RootElement.GetProperty("providers")[0].GetProperty("windows")[0];
+                    Check(codexRow.GetProperty("remaining").GetDouble() == remaining,
+                        "the actual popup accepts a new synthetic Codex value independently of the Claude attempt");
+                }
+
+                clock.Advance(29);
+                Invoke(refresh, "Expire");
+                Check(Active() && File.ReadAllText(cachePath) == previous, "unanswered automatic refresh is still pending before the deadline");
+                VerifyCodexDisplay(76);
+                clock.Advance(1);
+                Invoke(refresh, "Expire");
+                Check((DateTimeOffset?)Get(State(), "NextAttempt") == clock.GetUtcNow().AddSeconds(30),
+                    "response timeout schedules the first transient retry");
+                releaseReply.SetResult(true);
+                Check(await late == "200", "a delayed browser response arrives after the automatic attempt expires");
+                CheckCacheUnchanged(previous, "ResponseTimeout");
+                VerifyCodexDisplay(75);
+                clock.Advance(29);
+                await StartRefresh("Automatic");
+                CheckCacheUnchanged(previous, "ResponseTimeout");
+                clock.Advance(1);
+                await NavigateUsage("Automatic");
+                await CommitDelayedQuery(54);
+
+                clock.Advance(60);
+                await NavigateUsage("Automatic");
+                Task<string> stopped = await HoldUsageReply(url: origin + endpoint + usageQuery);
+                await SameDocument("/new#fixture");
+                Check(Active() && successes == 4, "shutdown interrupts the next scheduled refresh after recovery");
+                Invoke(refresh, "Stop");
+                releaseReply.SetResult(true);
+                Check(await stopped == "200", "browser completes the registered request after shutdown");
+                clock.Advance(60);
+                await StartRefresh("Automatic");
+                CheckCacheUnchanged(previous, "Success");
+                Check(Get(State(), "Phase")!.ToString() == "Stopped" && successes == 4,
+                    "shutdown rejects both the late response and subsequent automatic work");
+                Console.WriteLine("PASS: actual WebView2 startup cache restore, two scheduled refreshes, timeout recovery, and shutdown.");
+            }
+
+            if (restart)
+            {
+                await VerifyStartupRecovery();
+                return;
+            }
+
+            await ((Task)Invoke(window, "ObserveNavigationAsync")).WaitAsync(limit);
             await VerifyRefresh(11, bootstrap: false);
             await VerifyRefresh(22, bootstrap: false);
             await Evaluate("location.hash='fixture'");
             await VerifyRefresh(33, bootstrap: false);
             string previousCache = await VerifyRefresh(44, bootstrap: true);
 
-            foreach ((string trigger, string path) in new[]
+            foreach ((string trigger, string path, string query) in new[]
             {
-                ("Manual", "/new"), ("Automatic", "/new"), ("Manual", "/new#fixture")
+                ("Manual", "/new", ""), ("Automatic", "/new", ""),
+                ("Manual", "/new#fixture", ""), ("Manual", "/new#fixture", usageQuery)
             })
             {
                 clock.Advance(60);
                 int firstUsed = ++used;
                 int before = successes;
                 await NavigateUsage(trigger);
-                Task<string> pending = await HoldUsageReply();
+                Task<string> pending = await HoldUsageReply(url: origin + endpoint + query);
                 object binding = WindowField("_pageAttempt")!;
-                Check(Invoke(binding, "SelectRequest") != null, "official GET registered before leaving the usage route");
+                object selected = Invoke(binding, "SelectRequest");
+                Check(selected != null && Equals(Get(selected, "Url"), origin + endpoint + query) &&
+                    Equals(Get(selected, "Frame"), WindowField("_documentFrame")) &&
+                    Equals(Get(selected, "Loader"), WindowField("_documentLoader")) && Get(selected, "Status") == null,
+                    "official GET registered with its full URL in the current main frame and loader before any response");
                 await SameDocument(path);
                 used = 99;
                 await Receive();
                 used = firstUsed;
-                bool keptOriginal = Active() && ((IList)Get(binding, "Requests")!).Count == 1 &&
+                bool keptOriginal = Active() && (bool)Get(binding, "Draining")! &&
+                    ((IList)Get(binding, "Requests")!).Count == 1 && ReferenceEquals(Invoke(binding, "SelectRequest"), selected) &&
                     File.ReadAllText(cachePath) == previousCache;
                 releaseReply.SetResult(true);
                 Check(await pending == "200", "original GET receives 200 after the route change");
                 await AwaitAttemptEnd();
                 string saved = File.ReadAllText(cachePath);
                 Check(Result() == "Success" && successes == before + 1 && saved != previousCache && saved.Contains($"\"UsedPercent\":{used}") &&
-                    !saved.Contains("fixture_private"), $"original GET saves normalized cache after {path} " +
+                    !saved.Contains("fixture_private"), $"original GET saves normalized cache after same-document move " +
+                    $"(with query: {query.Length != 0}) " +
                     $"(actual: {Result()}, cache unchanged: {saved == previousCache})");
                 Check(keptOriginal, "a new GET after the route change does not join the frozen set or replace the cache");
                 previousCache = saved;
@@ -1352,16 +1491,16 @@ internal static class PacingProbe
                 "/new/", "/new/#fixture", "/settings/organization" })
             {
                 await NavigateUsage();
-                Task<string>? pending = path == "/new" ? null : await HoldUsageReply();
+                Task<string>? pending = path == "/new" ? null : await HoldUsageReply(url: origin + endpoint + usageQuery);
                 await SameDocument(path);
                 await AwaitAttemptEnd();
                 releaseReply.TrySetResult(true);
                 if (pending != null) { Check(await pending == "200", "ineligible route receives the delayed 200"); }
                 else { await Receive(); }
-                CheckCacheUnchanged(previousCache, "NavigationFailed", path);
+                CheckCacheUnchanged(previousCache, "NavigationFailed", "ineligible destination or no registered request");
             }
 
-            foreach (string url in new[] { origin + endpoint + "?fixture", origin + endpoint + "/other", "https://outside.invalid" + endpoint })
+            foreach (string url in new[] { origin + endpoint + "/other", "https://outside.invalid" + endpoint })
             {
                 await NavigateUsage();
                 Task<string> ineligibleReply = await HoldUsageReply(url: url);
@@ -1407,12 +1546,22 @@ internal static class PacingProbe
             foreach (string invalid in new[] { "fromDiskCache", "fromServiceWorker", "fromPrefetchCache", "url", "loader", "frame" })
             {
                 await NavigateUsage();
-                Task<string> pending = await HoldUsageReply();
+                Task<string> pending = await HoldUsageReply(url: origin + endpoint + usageQuery);
                 object selected = Invoke(WindowField("_pageAttempt")!, "SelectRequest");
-                await SameDocument("/new");
+                await SameDocument("/new#fixture");
+                if (invalid == "url")
+                {
+                    using var unrelated = JsonDocument.Parse(JsonSerializer.Serialize(new
+                    {
+                        requestId = "unrelated-request", loaderId = Get(selected, "Loader"), frameId = Get(selected, "Frame"),
+                        response = new { url = origin + endpoint + usageQuery, status = 200 }
+                    }));
+                    Invoke(window, "OnResponse", unrelated.RootElement);
+                    Check(Active() && Get(selected, "Status") == null, "a different request ID cannot attach a matching response");
+                }
                 var response = new System.Collections.Generic.Dictionary<string, object>
                 {
-                    ["url"] = origin + endpoint + (invalid == "url" ? "?other" : ""),
+                    ["url"] = origin + endpoint + (invalid == "url" ? "?fixture=other" : usageQuery),
                     ["status"] = 200
                 };
                 if (invalid.StartsWith("from", StringComparison.Ordinal)) { response[invalid] = true; }
@@ -1429,6 +1578,17 @@ internal static class PacingProbe
                 CheckCacheUnchanged(previousCache, "NetworkFailed", invalid);
             }
 
+            await NavigateUsage();
+            Task<string> lockedReply = await HoldUsageReply(url: origin + endpoint + usageQuery);
+            await SameDocument("/new#fixture");
+            using (var locked = new FileStream(cachePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                releaseReply.SetResult(true);
+                Check(await lockedReply == "200", "a valid delayed 200 still requires a successful cache replacement");
+                await AwaitAttemptEnd();
+                CheckCacheUnchanged(previousCache, "StorageWrite");
+            }
+
             foreach ((int status, string result) in new[] { (503, "ServerError"), (429, "RateLimited"),
                          (302, "NetworkFailed"), (200, "ResponseFormat"), (200, "ResponseRange"),
                          (403, "AccessRequired"), (401, "LoginRequired") })
@@ -1436,8 +1596,8 @@ internal static class PacingProbe
                 endpointStatus = status;
                 endpointBody = result switch { "ResponseFormat" => "{bad", "ResponseRange" => new string(' ', 65537), _ => null };
                 await NavigateUsage();
-                Task<string> pending = await HoldUsageReply();
-                await SameDocument("/new");
+                Task<string> pending = await HoldUsageReply(url: origin + endpoint + usageQuery);
+                await SameDocument("/new#fixture");
                 releaseReply.SetResult(true);
                 Check(await pending == (status == 302 ? "404" : status.ToString()), "frozen GET receives the synthetic error response");
                 await AwaitAttemptEnd();
@@ -1623,7 +1783,8 @@ internal static class PacingProbe
             TaskCompletionSource<bool>? browserExited = null;
             try
             {
-                await CheckClaudeNavigationAsync();
+                await CheckClaudeNavigationAsync(restart: false);
+                await CheckClaudeNavigationAsync(restart: true);
                 var options = new CoreWebView2EnvironmentOptions("--disable-background-networking --no-first-run");
                 var environment = await CoreWebView2Environment.CreateAsync(null,
                     Path.Combine(_root, "render-profile"), options).WaitAsync(TimeSpan.FromSeconds(30));

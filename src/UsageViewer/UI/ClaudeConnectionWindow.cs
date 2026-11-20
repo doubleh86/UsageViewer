@@ -326,7 +326,7 @@ internal sealed class ClaudeConnectionWindow : Form
 
         bool IsCandidate(ClaudePageRequest request) => request.Loader == pageAttempt.Loader && request.Frame == pageAttempt.Frame &&
             request.DocumentUrl == UsageUrl && Uri.TryCreate(request.Url, UriKind.Absolute, out Uri? uri) == true &&
-            uri.Query.Length == 0 && uri.Fragment.Length == 0;
+            uri.Fragment.Length == 0;
 
         if (pageAttempt.Reading == true && pageAttempt.SelectRequest() is ClaudePageRequest selected && IsCandidate(selected) == false)
         {
