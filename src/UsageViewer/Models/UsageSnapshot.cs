@@ -10,7 +10,10 @@ internal sealed record CreditBalance(decimal? Balance, bool? HasCredits, bool Un
 internal sealed record UsageBucket(string Id, string Name, UsageWindow? Primary, UsageWindow? Secondary,
                                   CreditBalance? Credits = null);
 
-internal sealed record UsageSnapshot(string PlanName, IReadOnlyList<UsageBucket> Buckets, DateTimeOffset RetrievedAt);
+internal sealed record UsageSnapshot(string PlanName, IReadOnlyList<UsageBucket> Buckets, DateTimeOffset RetrievedAt)
+{
+    public string? CreditAccountScope { get; init; }
+}
 
 internal sealed class UsageQueryException : Exception
 {

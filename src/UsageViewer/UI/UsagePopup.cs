@@ -14,6 +14,7 @@ internal sealed record ProviderUsageState(string Name, UsageSnapshot? Snapshot, 
 internal sealed class UsagePopup : Form
 {
     private readonly WebView2 _browser = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = Color.FromArgb(23, 29, 37) };
+    private readonly CreditUsageTracker _creditTracker = new();
     private readonly PopupPreferencesStore _preferencesStore;
     private readonly string _profilePath;
     private PopupPreferences _preferences;
@@ -74,6 +75,7 @@ internal sealed class UsagePopup : Form
                          ClaudeUsageDisplay? claudeWeb = null)
     {
         _codex = new ProviderUsageState("Codex", snapshot, error, Advice: codexAdvice);
+        _creditTracker.Evaluate(snapshot, error, DateTimeOffset.UtcNow);
         _claude = new ProviderUsageState("Claude", claude, claudeError, claudeStale, claudeAdvice, claudeWeb);
         _refreshing = refreshing;
         UpdateDocument();
@@ -337,6 +339,8 @@ internal sealed class UsagePopup : Form
             ClaudeUsageDisplay? claudeWeb = app.Id == "claude" ? state.ClaudeWeb : null;
             UsageSnapshot? snapshot = app.UsageSupported == true ? state.Snapshot : null;
             UsagePacingAdvice advice = state.Advice ?? new UsagePacingAdvice(UsagePacingLevel.Unavailable);
+            CreditUsageState? creditUsage = app.Id == "codex" ?
+                _creditTracker.Evaluate(snapshot, state.Error, DateTimeOffset.UtcNow) : null;
             List<object> windows = new List<object>();
             if (snapshot != null)
             {
@@ -359,6 +363,14 @@ internal sealed class UsagePopup : Form
                         pacingItem?.Reason == null && pacingItem?.Daily != null &&
                         pacingItem.Level is UsagePacingLevel.Recommended or UsagePacingLevel.UntilReset ?
                         Math.Clamp(window.RemainingPercent - (double)pacingItem.Daily.RemainingPercent, 0, 100) : null;
+                    bool creditBacked = creditUsage?.HasBalance == true && creditUsage.BucketId == bucket.Id;
+                    string? weeklyMessage = window.DurationMinutes == 10080 && pacingItem != null ?
+                                            UsageDisplayHelper.GetWeeklyMessage(pacingItem) : null;
+                    if (creditBacked == true && pacingItem?.Level == UsagePacingLevel.Exhausted)
+                    {
+                        weeklyMessage = "주간 한도 소진 · " +
+                                        (creditUsage!.Label == "크레딧 무제한" ? creditUsage.Label : "크레딧 잔액 보유");
+                    }
                     windows.Add(new
                     {
                         name,
@@ -372,9 +384,9 @@ internal sealed class UsagePopup : Form
                         weekly = window.DurationMinutes == 10080,
                         average24Hours = pacingItem?.Average24Hours,
                         dailyBoundaryRemaining,
+                        creditBacked,
                         pacingReason = pacingItem?.Reason,
-                        pacingMessage = window.DurationMinutes == 10080 && pacingItem != null ?
-                                        UsageDisplayHelper.GetWeeklyMessage(pacingItem) : null,
+                        pacingMessage = weeklyMessage,
                         tomorrowMessage = window.DurationMinutes == 10080 && pacingItem != null ?
                                           UsageDisplayHelper.GetTomorrowMessage(pacingItem) : null,
                         shortTermWarning = pacingItem != null ? UsageDisplayHelper.FormatShortTermWarning(pacingItem) : ""
@@ -382,7 +394,7 @@ internal sealed class UsagePopup : Form
                 }
             }
 
-            CreditBalance? credits = snapshot?.Buckets.FirstOrDefault()?.Credits;
+            CreditBalance? credits = CreditUsageTracker.SelectBucket(snapshot)?.Credits;
             string? balance = app.Id != "codex" || snapshot == null ? null :
                               credits?.Unlimited == true ? "무제한" :
                               credits?.Balance?.ToString("#,0.##", CultureInfo.InvariantCulture) ??
@@ -408,6 +420,9 @@ internal sealed class UsagePopup : Form
                     basis = UsageDisplayHelper.FormatPacingBasis(advice)
                 },
                 credits = balance,
+                creditLabel = creditUsage?.Label,
+                creditConfirmed = creditUsage?.DeductionConfirmed == true,
+                creditDetail = creditUsage?.Detail,
                 status = claudeWeb?.Detail,
                 previous = claudeWeb?.IsCurrent == false && snapshot != null,
                 web = claudeWeb != null,

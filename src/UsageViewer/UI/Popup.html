@@ -12,6 +12,7 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
 .uv-weekly-status{margin-top:6px;font-size:11px;overflow-wrap:anywhere}.uv-help{margin-top:10px;color:#a8b5c6;font-size:11px;overflow-wrap:anywhere}.uv-help summary{cursor:pointer;min-height:26px;line-height:26px}.uv-help summary:focus-visible{outline:2px solid #73dec1}.uv-help p{margin:3px 0 0}.uv-limit{margin-top:12px;overflow-wrap:anywhere}.uv-limit:first-child{margin-top:0}
 .uv-provider-status{margin:0 0 8px;overflow-wrap:anywhere}.uv-provider-status .uv-connect{display:block}
 .uv-track{position:relative;overflow:visible}.uv-track>span{border-radius:2px}.uv-daily-marker{position:absolute;left:0;top:-3px;width:2px;height:10px;background:#edf2f8;border-radius:1px;transform:translateX(-50%);box-shadow:0 0 0 1px #171d25}
+.uv-credit-confirmed{color:#7aaeff}.uv-credit-detail{color:#a8b5c6;font-size:11px;margin-top:3px;overflow-wrap:anywhere}.uv-credit-notice{margin:7px 0;padding:6px 8px;border-radius:5px;background:#202c3b;color:#c2d8f6;font-size:11px;overflow-wrap:anywhere}.uv-credit-notice.uv-credit-confirmed{background:#172d4c;color:#a9ceff}
 </style></head>
 <body><main id="app" class="uv-window" aria-label="AI 사용량"><header><strong>Usage</strong></header><div class="uv-empty">설치된 AI 확인 중…</div></main>
 <script>
@@ -38,7 +39,13 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
   }
   return '<div class="uv-track '+(p.id==='claude'?'uv-cl-track ':'')+(w.alert==='critical'?'uv-critical':w.alert==='warning'?'uv-low':'')+'"><span style="width:'+Math.max(0,Math.min(100,w.remaining))+'%"></span>'+marker+'</div>';
  }
- function alertNotice(p){const low=p.windows.filter(w=>w.alert==='critical'||w.alert==='warning').sort((a,b)=>a.remaining-b.remaining);if(!low.length)return '';const w=low[0],critical=w.alert==='critical';return '<div class="uv-alert-note '+(critical?'uv-critical':'')+'">! '+(critical?'레드 얼럿':'사용량 주의')+' · '+esc(w.shortName)+' '+percent(w.remaining)+' 남음</div>'}
+ function alertNotice(p){
+  const low=p.windows.filter(w=>w.alert==='critical'||w.alert==='warning').sort((a,b)=>a.remaining-b.remaining);if(!low.length)return '';
+  const backed=w=>p.id==='codex'&&w.remaining===0&&w.creditBacked&&!w.invalid&&!w.expired&&!p.stale&&!p.error;
+  const w=low.find(w=>!backed(w))||low[0],critical=w.alert==='critical';
+  if(backed(w))return '<div class="uv-credit-notice '+(p.creditConfirmed?'uv-credit-confirmed':'')+'">구독 한도 소진 · '+esc(p.creditLabel||'크레딧 잔액 보유')+'</div>';
+  return '<div class="uv-alert-note '+(critical?'uv-critical':'')+'">! '+(critical?'레드 얼럿':'사용량 주의')+' · '+esc(w.shortName)+' '+percent(w.remaining)+' 남음</div>';
+ }
  function pacing(p){if(!p.pacing)return '';const a=p.pacing;return (a.level==='unavailable'&&!p.windows.some(w=>w.weekly)?'<div class="uv-warning">'+esc(a.reason||a.message)+'</div>':'')+'<details class="uv-help" data-help="'+esc(p.id)+'" '+(helpOpen.has(p.id)?'open':'')+'><summary>오늘 권장량은 뭔가요?</summary><p>'+esc(a.basis)+'</p></details>'}
  function limit(p,w,large){
   const value=w.expired||w.invalid?(p.web&&w.expired?'갱신 중':'갱신 필요'):percent(w.remaining)+' <small>남음</small>';
@@ -55,7 +62,8 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
  function usage(p,large){
   let html=p.web&&p.status?'<div class="uv-warning uv-provider-status">'+(p.previous?'이전 값 · ':'')+esc(p.status)+(p.canConnect?'<button type="button" class="uv-connect" data-action="connect" data-id="claude">연결 창 열기</button>':'')+'</div>':'';
   html+=p.windows.length?p.windows.map((w,i)=>limit(p,w,large&&i===0)).join(''):p.web&&p.status?'':empty(p);
-  if(p.credits!=null)html+='<div class="uv-line uv-credit"><span class="uv-muted">크레딧</span><strong>'+esc(p.credits)+'</strong></div>';
+  if(p.credits!=null)html+='<div class="uv-line uv-credit"><span class="'+(p.creditConfirmed&&!p.stale&&!p.error?'uv-credit-confirmed':'uv-muted')+'">'+esc(p.creditLabel||'크레딧')+'</span><strong>'+esc(p.credits)+'</strong></div>';
+  if(p.creditDetail&&!p.stale&&!p.error)html+='<div class="uv-credit-detail">'+esc(p.creditDetail)+'</div>';
   if(!p.web&&p.windows.length&&(p.error||p.stale))html+='<div class="uv-warning">'+esc(p.error||'이전 수신 값')+'</div>'+(p.canConnect?'<button type="button" class="uv-connect" data-action="connect" data-id="'+esc(p.id)+'">다시 연결</button>':'');
   return html+alertNotice(p)+pacing(p);
  }

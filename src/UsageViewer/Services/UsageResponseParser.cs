@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using UsageViewer.Models;
 
 namespace UsageViewer.Services;
@@ -43,7 +45,10 @@ internal sealed class UsageResponseParser
         List<UsageBucket> ordered = buckets.OrderBy(bucket => bucket.Id == "codex" ? 0 : 1)
             .ThenBy(bucket => bucket.Name, StringComparer.OrdinalIgnoreCase).ToList();
 
-        return new UsageSnapshot(planName, ordered, DateTimeOffset.UtcNow);
+        string? accountId = ReadString(response, "accountId");
+        string? scope = accountId is { Length: <= 1024 } ?
+                        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("codex-credit|" + accountId))) : null;
+        return new UsageSnapshot(planName, ordered, DateTimeOffset.UtcNow) { CreditAccountScope = scope };
     }
 
     private void AddBucket(List<UsageBucket> buckets, JsonElement element, string fallbackId)

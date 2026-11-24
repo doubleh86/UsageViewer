@@ -70,6 +70,17 @@ check(!render([provider('codex',[weekly('오늘 남은 권장량: 1.00%','')])])
 check(!render([provider('codex',[weekly('오늘 남은 권장량: 0.00%','')])]).includes('내일 예상'),'missing estimate is not zero');
 check(render([provider('codex',[weekly('오늘 몫 소진','내일 예상 권장량: 약 0.00% (참고)')])]).includes('약 0.00%'),'valid recommendation zero is displayable');
 check(render([provider('codex',[weekly('fixture','<img src=x onerror=bad()>')])]).includes('&lt;img'),'estimate text escaped');
+const creditProvider={...provider('codex',[{...weekly('주간 한도 소진 · 크레딧 잔액 보유',''),remaining:0,alert:'critical',creditBacked:true}]),credits:'62,000.25',creditLabel:'크레딧 차감 확인',creditConfirmed:true,creditDetail:'최근 조회보다 68.44 감소'};
+for(const both of [true,false]){
+    const markup=render([creditProvider],both);
+    check(markup.includes('uv-credit-confirmed')&&markup.includes('크레딧 차감 확인')&&markup.includes('68.44 감소'),'confirmed debit rendered in both views');
+    check(markup.includes('uv-credit-notice')&&!markup.includes('초기화를 기다려')&&!markup.includes('레드 얼럿'),'credit-backed exhaustion explains remaining balance');
+}
+check(!render([{...creditProvider,stale:true}]).includes('uv-credit-notice'),'stale credit cannot replace quota warning');
+check(!render([{...creditProvider,error:'fixture'}]).includes('68.44 감소'),'failed credit hides confirmed delta');
+check(render([{...creditProvider,creditConfirmed:false,creditLabel:'크레딧 잔액 보유',creditDetail:null}]).includes('크레딧 잔액 보유'),'balance without observed debit is not active usage');
+check(render([{...creditProvider,windows:[...creditProvider.windows,{...weekly(),name:'Other model',remaining:0,alert:'critical'}]}]).includes('레드 얼럿'),'unbacked model warning remains visible');
+check(render([{...creditProvider,creditLabel:'<img src=x onerror=bad()>'}]).includes('&lt;img'),'credit label escaped');
 check(/\.uv-limit\{[^}]*overflow-wrap:anywhere/.test(html)&&/\.uv-weekly-status\{[^}]*overflow-wrap:anywhere/.test(html),'narrow row wrapping rules present (no layout measurement)');
 render(undefined,false,'codex');
 events.click({target:{closest:()=>({dataset:{provider:'claude'}})}});
@@ -118,6 +129,7 @@ internal static class PacingProbe
     private static string _dailyDocument = "";
     private static string _tomorrowDocument = "";
     private static string _claudeStatusDocument = "";
+    private static string _creditDocument = "";
     private static readonly DateTimeOffset Start = DateTimeOffset.Parse("2026-11-09T18:12:00+09:00");
     private static readonly DateTimeOffset DailyStart = DateTimeOffset.Parse("2026-11-09T00:00:00+09:00");
     private static readonly DateTimeOffset Reset = DateTimeOffset.Parse("2026-11-14T01:10:00+09:00");
@@ -143,6 +155,7 @@ internal static class PacingProbe
                 CheckDailyAllowance();
                 CheckDailyFormula();
                 CheckTomorrowGuidance();
+                CheckCreditUsage();
             }
             CheckClaudeRefresh();
             CheckPresentation();
@@ -182,6 +195,63 @@ internal static class PacingProbe
     private static object Snapshot(DateTimeOffset at, params object[] buckets) => New("Models.UsageSnapshot",
         "synthetic", ArrayOf("Models.UsageBucket", buckets), at);
     private static object Sample(double remaining = 76) => Snapshot(Start, Bucket("weekly", Week(remaining)));
+
+    private static object CreditSample(DateTimeOffset at, decimal? balance, string? scope = "A",
+                                       string bucketId = "codex", bool unlimited = false)
+    {
+        object credit = New("Models.CreditBalance", balance, true, unlimited);
+        object bucket = New("Models.UsageBucket", bucketId, bucketId, Window(0, 10080, at.AddDays(3)), null, credit);
+        object sample = Snapshot(at, bucket);
+        sample.GetType().GetProperty("CreditAccountScope")!.SetValue(sample,
+            scope == null ? null : new string(scope[0], 64));
+        return sample;
+    }
+
+    private static void CheckCreditUsage()
+    {
+        object tracker = New("Services.CreditUsageTracker");
+        object Read(DateTimeOffset at, decimal? balance, string? scope = "A", string bucketId = "codex") =>
+            Invoke(tracker, "Evaluate", CreditSample(at, balance, scope, bucketId), null, at);
+        object first = Read(Start, 100);
+        Check((bool)Get(first, "HasBalance")! && !(bool)Get(first, "DeductionConfirmed")!, "credit first receipt only establishes balance");
+        object decreased = Read(Start.AddMinutes(1), 87.5m);
+        Check((bool)Get(decreased, "DeductionConfirmed")! && (string)Get(decreased, "Detail")! == "최근 조회보다 12.5 감소",
+              "same owner balance decrease confirmed without a billing-mode assumption");
+        Check((string)Get(Read(Start.AddMinutes(1), 87.5m), "Detail")! == (string)Get(decreased, "Detail")!, "same receipt is idempotent");
+        Check(!(bool)Get(Read(Start.AddMinutes(1), 1), "HasBalance")!, "conflicting values for one receipt rejected");
+        Check(!(bool)Get(Read(Start.AddSeconds(30), 2), "HasBalance")!, "older receipt cannot overwrite latest balance");
+        Check((bool)Get(Read(Start.AddMinutes(2), 87.5m), "DeductionConfirmed")!, "unchanged balance retains recent observation");
+        Check(!(bool)Get(Read(Start.AddMinutes(3), 90), "DeductionConfirmed")!, "balance increase clears debit confirmation");
+        Check((string)Get(Read(Start.AddMinutes(4), 89.999m), "Detail")! == "최근 조회보다 0.01 미만 감소", "tiny debit is not zero");
+        Check(!(bool)Get(Read(Start.AddMinutes(5), 10, "B"), "DeductionConfirmed")!, "different owner establishes new baseline");
+        Check(!(bool)Get(Read(Start.AddMinutes(6), 2, "B", "other"), "DeductionConfirmed")!, "different bucket establishes new baseline");
+        Check(!(bool)Get(Read(Start.AddMinutes(7), 1, null), "DeductionConfirmed")! &&
+              !(bool)Get(Read(Start.AddMinutes(8), 0.5m, null), "DeductionConfirmed")!, "missing owner never compares accounts");
+        Check(!(bool)Get(Read(Start.AddMinutes(9), 0), "HasBalance")!, "zero credit balance is empty");
+        Check(!(bool)Get(Read(Start.AddMinutes(10), null), "HasBalance")!, "unprovided balance stays unknown");
+        object unlimited = Invoke(tracker, "Evaluate", CreditSample(Start.AddMinutes(11), null, unlimited: true), null, Start.AddMinutes(11));
+        Check((bool)Get(unlimited, "HasBalance")! && !(bool)Get(unlimited, "DeductionConfirmed")!, "unlimited credits have no numeric debit inference");
+        Read(Start.AddMinutes(12), 100);
+        Read(Start.AddMinutes(13), 90);
+        object failed = Invoke(tracker, "Evaluate", CreditSample(Start.AddMinutes(14), 80), "fixture", Start.AddMinutes(14));
+        Check(!(bool)Get(failed, "HasBalance")! && !(bool)Get(Read(Start.AddMinutes(15), 70), "DeductionConfirmed")!, "failed query resets comparable history");
+        object stale = Invoke(tracker, "Evaluate", CreditSample(Start.AddMinutes(15), 70), null, Start.AddMinutes(31));
+        Check(!(bool)Get(stale, "HasBalance")! && !(bool)Get(Read(Start.AddMinutes(32), 60), "DeductionConfirmed")!, "stale observation resets history");
+        Check(!(bool)Get(Read(Start.AddMinutes(48), 50), "DeductionConfirmed")!, "long successful query gap does not infer debit");
+        object future = Invoke(tracker, "Evaluate", CreditSample(Start.AddMinutes(50), 40), null, Start.AddMinutes(49));
+        Check(!(bool)Get(future, "HasBalance")!, "future receipt is unavailable");
+        object expiredTracker = New("Services.CreditUsageTracker");
+        Invoke(expiredTracker, "Evaluate", CreditSample(Start, 100), null, Start);
+        Invoke(expiredTracker, "Evaluate", CreditSample(Start.AddMinutes(1), 90), null, Start.AddMinutes(1));
+        object oldConfirmation = Invoke(expiredTracker, "Evaluate", CreditSample(Start.AddMinutes(15), 90), null, Start.AddMinutes(17));
+        Check(!(bool)Get(oldConfirmation, "DeductionConfirmed")!, "old debit does not remain a permanent active-use indicator");
+        using JsonDocument payload = JsonDocument.Parse("{\"accountId\":\"fixture-owner-private\",\"rateLimits\":{\"limitId\":\"codex\",\"credits\":{\"hasCredits\":true,\"unlimited\":false,\"balance\":\"100\"}}}");
+        object parsed = Invoke(New("Services.UsageResponseParser"), "Parse", "synthetic", payload.RootElement);
+        string owner = (string)Get(parsed, "CreditAccountScope")!;
+        Check(owner.Length == 64 && owner.All(Uri.IsHexDigit) && !owner.Contains("fixture-owner"), "account response identifier is hashed only in memory");
+        Check(Get(New("Models.UsageSnapshot", "synthetic", ArrayOf("Models.UsageBucket"), Start), "CreditAccountScope") == null,
+              "older responses have no assumed owner");
+    }
 
     private static object ClaudeEnum(string type, string value) => Enum.Parse(TypeOf("Models.ClaudeRefresh" + type), value);
 
@@ -1049,6 +1119,26 @@ internal static class PacingProbe
                       rows[2].GetProperty("pacingMessage").GetString() == "내일 몫을 당겨 쓰는 중",
                       "actual popup JSON carries independent before, exact, and over-budget guidance");
             }
+            DateTimeOffset creditNow = DateTimeOffset.UtcNow;
+            object initialCredits = CreditSample(creditNow.AddMinutes(-1), 100);
+            object spentCredits = CreditSample(creditNow, 87.5m);
+            Invoke(popup, "SetState", initialCredits, false, null, null, null, false,
+                   Evaluate(initialCredits, creditNow), unavailable, null);
+            Invoke(popup, "SetState", spentCredits, false, null, null, null, false,
+                   Evaluate(spentCredits, creditNow), unavailable, null);
+            _creditDocument = JsonSerializer.Serialize(Invoke(popup, "BuildDocumentState"));
+            using (JsonDocument creditPayload = JsonDocument.Parse(_creditDocument))
+            {
+                JsonElement credits = creditPayload.RootElement.GetProperty("providers")[0];
+                Check(credits.GetProperty("creditConfirmed").GetBoolean() &&
+                      credits.GetProperty("creditLabel").GetString() == "크레딧 차감 확인" &&
+                      credits.GetProperty("creditDetail").GetString() == "최근 조회보다 12.5 감소",
+                      "actual popup exposes observed debit without account identifiers");
+                Check(credits.GetProperty("windows")[0].GetProperty("pacingMessage").GetString() ==
+                      "주간 한도 소진 · 크레딧 잔액 보유", "credit-backed quota does not tell user to wait");
+                Check(!_creditDocument.Contains("CreditAccountScope") && !_creditDocument.Contains(new string('A',64)),
+                      "owner scope is never sent to embedded page");
+            }
             Invoke(bar, "LayoutDock");
             object size = Get(bar, "ClientSize")!;
             int dpi = (int)Get(bar, "DeviceDpi")!;
@@ -1859,6 +1949,16 @@ internal static class PacingProbe
                 Check(await ScriptBool(browser, "document.querySelector('.uv-daily-marker').style.left==='57.23%' && document.querySelector('.uv-track>span').style.width==='65%'"), "screenshot allowance boundary preserves actual fill");
                 await browser.ExecuteScriptAsync("dailyFixture.providers[0].stale=true;usageViewer.update(dailyFixture);");
                 Check(await ScriptBool(browser, "!document.querySelector('.uv-daily-marker')"), "stale daily allowance hides marker");
+                await browser.ExecuteScriptAsync("fixture.showBoth=false;fixture.activeProvider='claude';usageViewer.update(fixture);");
+                await browser.ExecuteScriptAsync("window.creditFixture=" + _creditDocument + ";");
+                foreach ((int width, bool both) in new[] { (264, false), (280, false), (320, true) })
+                {
+                    host.ClientSize = new Size(width, 1000);
+                    await browser.ExecuteScriptAsync($"creditFixture.showBoth={both.ToString().ToLowerInvariant()};creditFixture.activeProvider='codex';usageViewer.update(creditFixture);");
+                    Check(await ScriptBool(browser, "document.body.innerText.includes('크레딧 차감 확인') && document.body.innerText.includes('12.5 감소') && document.querySelector('.uv-credit .uv-credit-confirmed')!==null"), "confirmed credit status rendered " + width);
+                    Check(await ScriptBool(browser, "document.querySelector('.uv-credit-notice')!==null && !document.body.innerText.includes('초기화를 기다려 주세요') && document.documentElement.scrollWidth<=innerWidth"), "credit notice and narrow layout " + width);
+                    Check(await ScriptBool(browser, "getComputedStyle(document.querySelector('.uv-credit .uv-credit-confirmed')).color==='rgb(122, 174, 255)'"), "credit debit uses blue " + width);
+                }
                 await browser.ExecuteScriptAsync("fixture.showBoth=false;fixture.activeProvider='claude';usageViewer.update(fixture);");
                 var messages = new System.Collections.Generic.List<string>();
                 browser.CoreWebView2.WebMessageReceived += (_, args) => messages.Add(args.WebMessageAsJson);
