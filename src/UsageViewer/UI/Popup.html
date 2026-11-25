@@ -14,6 +14,7 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
 .uv-track{position:relative;overflow:visible}.uv-track>span{border-radius:2px}.uv-daily-marker{position:absolute;left:0;top:-3px;width:2px;height:10px;background:#edf2f8;border-radius:1px;transform:translateX(-50%);box-shadow:0 0 0 1px #171d25}
 .uv-credit-confirmed{color:#7aaeff}.uv-credit-detail{color:#a8b5c6;font-size:11px;margin-top:3px;overflow-wrap:anywhere}.uv-credit-notice{margin:7px 0;padding:6px 8px;border-radius:5px;background:#202c3b;color:#c2d8f6;font-size:11px;overflow-wrap:anywhere}.uv-credit-notice.uv-credit-confirmed{background:#172d4c;color:#a9ceff}
 .uv-work-line,.uv-work-scope{color:#a8b5c6;font-size:11px;margin:5px 0;overflow-wrap:anywhere}.uv-work-row{padding:6px 0;border-top:1px solid #303946;overflow-wrap:anywhere}.uv-work-row strong{color:#edf2f8}.uv-work-count{font-size:20px;color:#a0efdc}.uv-work-mode{display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap}.uv-work-mode .uv-tabs{flex-shrink:0}
+.uv-start-marker{position:absolute;top:-5px;width:2px;height:14px;background:#7aaeff;border-radius:1px;transform:translateX(-50%);box-shadow:0 0 0 1px #171d25;z-index:1}.uv-daily-marker{z-index:2}.uv-marker-legend{display:flex;flex-wrap:wrap;gap:2px 12px;margin:5px 0 0;color:#a8b5c6;font-size:10px;line-height:15px}.uv-marker-legend>span{display:inline-flex;align-items:center;gap:4px}.uv-marker-legend i{display:inline-block;width:2px;height:9px;background:#edf2f8;border-radius:1px}.uv-marker-legend .uv-start-key{height:12px;background:#7aaeff}
 </style></head>
 <body><main id="app" class="uv-window" aria-label="AI 사용량"><header><strong>Usage</strong></header><div class="uv-empty">설치된 AI 확인 중…</div></main>
 <script>
@@ -56,13 +57,20 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
  function brand(p){return '<div class="uv-brand"><span class="uv-mark uv-'+esc(p.id)+'">'+(p.id==='codex'?'C':p.id==='claude'?'✳':'·')+'</span><strong>'+esc(p.name)+'</strong><span class="uv-muted">'+esc(p.plan||'감지됨')+'</span></div>'}
  function meter(p,w){
   if(w.invalid||w.expired)return '<div class="uv-small uv-muted">'+(w.invalid?'잔여량 확인 필요':p.web?'초기화 후 새 값 확인 중':'새 수신 필요')+'</div>';
-  let marker='';
-  if(w.weekly&&!p.stale&&!p.error&&!w.pacingReason&&Number.isFinite(w.remaining)&&w.remaining>0&&w.remaining<=100&&Number.isFinite(w.dailyBoundaryRemaining)){
+  let marker='',legend='';
+  const daily=w.weekly&&!p.stale&&!p.error&&!w.pacingReason&&Number.isFinite(w.remaining)&&w.remaining>=0&&w.remaining<=100;
+  if(daily&&Number.isFinite(w.dailyStartRemaining)&&w.dailyStartRemaining>=0&&w.dailyStartRemaining<=100){
+   const label='오늘 첫 조회 기준 '+percent(w.dailyStartRemaining)+' 남음';
+   marker='<i class="uv-start-marker" role="img" aria-label="'+esc(label)+'" title="'+esc(label)+'" style="left:'+w.dailyStartRemaining+'%"></i>';
+   legend='<span title="'+esc(label)+'"><i class="uv-start-key" aria-hidden="true"></i>오늘 시작 '+percent(w.dailyStartRemaining)+'</span>';
+  }
+  if(daily&&w.remaining>0&&Number.isFinite(w.dailyBoundaryRemaining)){
    const boundary=Math.max(0,Math.min(w.remaining,w.dailyBoundaryRemaining));
    const label='오늘 권장량 사용 후 '+percent(boundary)+' 남음';
-   marker='<i class="uv-daily-marker" role="img" aria-label="'+esc(label)+'" title="'+esc(label)+'" style="left:'+boundary+'%"></i>';
+   marker+='<i class="uv-daily-marker" role="img" aria-label="'+esc(label)+'" title="'+esc(label)+'" style="left:'+boundary+'%"></i>';
+   if(legend)legend+='<span title="'+esc(label)+'"><i aria-hidden="true"></i>권장선</span>';
   }
-  return '<div class="uv-track '+(p.id==='claude'?'uv-cl-track ':'')+(w.alert==='critical'?'uv-critical':w.alert==='warning'?'uv-low':'')+'"><span style="width:'+Math.max(0,Math.min(100,w.remaining))+'%"></span>'+marker+'</div>';
+  return '<div class="uv-track '+(p.id==='claude'?'uv-cl-track ':'')+(w.alert==='critical'?'uv-critical':w.alert==='warning'?'uv-low':'')+'"><span style="width:'+Math.max(0,Math.min(100,w.remaining))+'%"></span>'+marker+'</div>'+(legend?'<div class="uv-marker-legend">'+legend+'</div>':'');
  }
  function alertNotice(p){
   const low=p.windows.filter(w=>w.alert==='critical'||w.alert==='warning').sort((a,b)=>a.remaining-b.remaining);if(!low.length)return '';

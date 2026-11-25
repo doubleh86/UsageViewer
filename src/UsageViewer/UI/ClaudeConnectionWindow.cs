@@ -38,11 +38,13 @@ internal sealed class ClaudePageAttempt(ClaudeRefreshAttempt attempt)
 
 internal sealed record ClaudeDocumentFailure(string Loader, string Frame, int Status, DateTimeOffset? RetryAfter);
 
-internal enum ClaudeRefreshRoute { Other, SettingsBootstrap, Usage }
+internal enum ClaudeRefreshRoute { Other, SettingsBootstrap, Usage, UsagePanel }
 
 internal sealed class ClaudeConnectionWindow : Form
 {
     private const string UsageUrl = "https://claude.ai/settings/usage";
+    private const string NewPageUrl = "https://claude.ai/new";
+    private const string UsagePanelUrl = NewPageUrl + "#settings/usage";
     private readonly WebView2 _browser = new WebView2 { Dock = DockStyle.Fill };
     private readonly Label _status;
     private readonly ClaudeWebUsageParser _parser = new ClaudeWebUsageParser();
@@ -297,7 +299,8 @@ internal sealed class ClaudeConnectionWindow : Form
         if (_documentFrame != null && ReadString(item, "frameId") == _documentFrame)
         {
             string? url = ReadString(item, "url");
-            if (IsNewPage(url) == true && _refreshRoute == ClaudeRefreshRoute.Usage && _documentUrl == UsageUrl &&
+            bool fromUsage = _refreshRoute == ClaudeRefreshRoute.Usage && _documentUrl == UsageUrl;
+            if (fromUsage == true && IsNewPage(url) == true && url != UsagePanelUrl &&
                 _pageAttempt is ClaudePageAttempt pageAttempt)
             {
                 FreezeInflightRequests(pageAttempt);
@@ -307,6 +310,8 @@ internal sealed class ClaudeConnectionWindow : Form
             ClaudeRefreshRoute route = GetRefreshRoute(_documentUrl);
             _refreshRoute = _refreshRoute switch
             {
+                _ when url == UsagePanelUrl && _pageAttempt != null &&
+                    (fromUsage == true || _refreshRoute == ClaudeRefreshRoute.UsagePanel) => ClaudeRefreshRoute.UsagePanel,
                 ClaudeRefreshRoute.SettingsBootstrap => route,
                 ClaudeRefreshRoute.Usage when route == ClaudeRefreshRoute.Usage => route,
                 _ => ClaudeRefreshRoute.Other
@@ -397,8 +402,11 @@ internal sealed class ClaudeConnectionWindow : Form
         string? documentUrl = ReadString(item, "documentURL");
         string? loader = ReadString(item, "loaderId");
         string? frame = ReadString(item, "frameId");
+        // WebView2 may omit the settings fragment from a request's documentURL.
+        bool fromUsagePanel = _refreshRoute == ClaudeRefreshRoute.UsagePanel &&
+            (documentUrl is NewPageUrl or UsagePanelUrl) && loader == _documentLoader && frame == _documentFrame;
         if (id == null || string.IsNullOrEmpty(loader) == true || frame == null || IsUsageEndpoint(url) == false ||
-            ReadString(request, "method") != "GET" || IsUsagePage(documentUrl) == false ||
+            ReadString(request, "method") != "GET" || (IsUsagePage(documentUrl) == false && fromUsagePanel == false) ||
             item.TryGetProperty("redirectResponse", out _) == true)
         {
             return;
@@ -645,11 +653,22 @@ internal sealed class ClaudeConnectionWindow : Form
                uri.Query.Length == 0 ? ClaudeRefreshRoute.SettingsBootstrap : ClaudeRefreshRoute.Other;
     }
 
-    private bool CanUseDocument(ClaudePageAttempt pageAttempt) => pageAttempt.Draining == true ?
-        Visible == false && IsNewPage(_documentUrl) == true : pageAttempt.Attempt.Trigger == ClaudeRefreshTrigger.Page ?
-        IsUsagePage(_documentUrl) : _refreshRoute == ClaudeRefreshRoute.Usage;
+    private bool CanUseDocument(ClaudePageAttempt pageAttempt)
+    {
+        if (pageAttempt.Draining == true)
+        {
+            return Visible == false && IsNewPage(_documentUrl) == true;
+        }
 
-    private static bool IsUsageEndpoint(string? url) => IsOfficial(url, out Uri uri) == true &&
+        if (pageAttempt.Attempt.Trigger == ClaudeRefreshTrigger.Page && IsUsagePage(_documentUrl) == true)
+        {
+            return true;
+        }
+
+        return _refreshRoute is ClaudeRefreshRoute.Usage or ClaudeRefreshRoute.UsagePanel;
+    }
+
+    private static bool IsUsageEndpoint(string? url) => IsOfficial(url, out Uri uri) == true && uri.Fragment.Length == 0 &&
         uri.Segments is ["/", "api/", "organizations/", { Length: > 1 }, "usage"];
 
     private static string? ReadString(JsonElement item, string name) =>

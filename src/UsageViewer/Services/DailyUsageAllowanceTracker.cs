@@ -143,7 +143,7 @@ internal sealed class DailyUsageAllowanceTracker
                         if (_entries.ContainsKey(key) == false)
                         {
                             weekly.Add(item with { Reason = "오늘 기준 기록 개수 초과", Daily = null,
-                                                    TomorrowEstimatePercent = null,
+                                                    TomorrowEstimatePercent = null, DailyStartRemainingPercent = null,
                                                     Level = UsagePacingLevel.Unavailable });
                             continue;
                         }
@@ -157,14 +157,15 @@ internal sealed class DailyUsageAllowanceTracker
                     {
                         Daily = new DailyUsageAllowance(entry.Target, used, todayRemaining,
                                                        entry.StartedAt, entry.CheckedAt),
-                        TomorrowEstimatePercent = tomorrow
+                        TomorrowEstimatePercent = tomorrow,
+                        DailyStartRemainingPercent = entry.BaselineRemaining
                     });
                     continue;
                 }
             }
 
             weekly.Add(item with { Reason = reason ?? "오늘 기준을 확인하지 못했어요", Daily = null,
-                                    TomorrowEstimatePercent = null,
+                                    TomorrowEstimatePercent = null, DailyStartRemainingPercent = null,
                                     Level = UsagePacingLevel.Unavailable });
         }
 

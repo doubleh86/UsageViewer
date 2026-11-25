@@ -72,6 +72,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _popup.SetWindowOptions(_topBarMenuItem.Checked, _alwaysOnTopMenuItem.Checked);
         _popup.WindowPreferencesChanged += (_, _) => ApplyWindowPreferences();
         _popup.VisibleChanged += (_, _) => _topBar.SetDetailsOpen(_popup.Visible == true && _popup.IsDocked == true);
+        _topBar.VisibleChanged += (_, _) =>
+        {
+            if (_topBar.Visible == false && _popup.IsDocked == true && _popup.Visible == true)
+            {
+                _popup.Hide();
+            }
+        };
         _topBar.ContextMenuStrip = _menu;
         _topBar.PlacementChanged += (_, _) => _popup.SetTopBarPlacement(_topBar.DockScreen, _topBar.DockPosition);
         _topBar.LocationChanged += (_, _) => _popup.MoveBelow(_topBar.Bounds);
