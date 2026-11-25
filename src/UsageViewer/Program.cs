@@ -9,6 +9,13 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Length > 0 && (args[0] == "--work-status-hook" || args[0] == "--work-status-source"))
+        {
+            WorkStatusHook.RunAsync(args).GetAwaiter().GetResult();
+
+            return 0;
+        }
+
         if (args.Length >= 1 && args.Length <= 2 && args[0] == "--claude-statusline")
         {
             try

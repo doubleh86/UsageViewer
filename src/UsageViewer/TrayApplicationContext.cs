@@ -17,6 +17,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly UsagePopup _popup = new UsagePopup();
     private readonly TopUsageBar _topBar = new TopUsageBar();
     private readonly UsageAlertMonitor _alerts = new UsageAlertMonitor();
+    private readonly WorkStatusStore _workStore = new WorkStatusStore();
+    private readonly System.Windows.Forms.Timer _workTimer = new System.Windows.Forms.Timer { Interval = 1000 };
     private readonly DailyUsageAllowanceTracker _dailyAllowances = new DailyUsageAllowanceTracker();
     private readonly UsageAlertSound _alertSound = new UsageAlertSound();
     private readonly UsageAlertToast _alertToast = new UsageAlertToast();
@@ -147,6 +149,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
             UpdatePopup();
             UpdateTray();
         };
+        CancellationToken workShutdown = _shutdown.Token;
+        WorkStatusCollector workCollector = new WorkStatusCollector(_workStore, WorkStatusCollector.DefaultPipeName);
+        _ = Task.Run(() => workCollector.ListenAsync(workShutdown));
+        _workTimer.Tick += (_, _) => UpdateWorkStatus();
+        _workTimer.Start();
         UpdatePopup();
 
         // Ensure an invokable UI handle exists before scheduling the first asynchronous read.
@@ -267,10 +274,18 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         _topBar.ApplyPreferences(preferences);
+        _topBar.SetWorkStatus(_workStore.Snapshot(DateTimeOffset.UtcNow), preferences.ShowTotalWorkCount);
         if (preferences.ShowTopBar == false && _popup.IsDocked == true)
         {
             _popup.Hide();
         }
+    }
+
+    private void UpdateWorkStatus()
+    {
+        WorkStatus work = _workStore.Snapshot(DateTimeOffset.UtcNow);
+        _popup.SetWorkStatus(work);
+        _topBar.SetWorkStatus(work, _popup.Preferences.ShowTotalWorkCount);
     }
 
     private void ShowPopup(Point anchor, bool fromTopBar = false, string? providerId = null)
@@ -280,7 +295,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
             return;
         }
 
-        UpdatePopup();
+        UpdateWorkStatus();
+        if (providerId != "work")
+        {
+            UpdatePopup();
+        }
         if (fromTopBar == true)
         {
             _popup.ShowBelow(_topBar.Bounds, providerId);
@@ -291,6 +310,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         _topBar.SetDetailsOpen(fromTopBar);
+        if (providerId == "work")
+        {
+            return;
+        }
+
         _ = ReadClaudeCodeAsync();
         bool oldSnapshot = _snapshot == null || DateTimeOffset.UtcNow - _snapshot.RetrievedAt >= TimeSpan.FromSeconds(60);
         bool expiredWindow = _snapshot?.Buckets.Any(bucket =>
@@ -554,6 +578,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         _exiting = true;
         _timer.Stop();
+        _workTimer.Stop();
         _claudeRefresh.Stop();
         _shutdown.Cancel();
         _popup.Hide();
@@ -586,6 +611,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _shutdown.Cancel();
             _showRegistration.Unregister(null);
             _timer.Dispose();
+            _workTimer.Dispose();
             _tray.Dispose();
             _menu.Dispose();
             _icon.Dispose();

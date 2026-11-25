@@ -1,7 +1,8 @@
 ﻿param(
     [string]$DotNetPath = (Join-Path $env:USERPROFILE '.dotnet/dotnet.exe'),
     [switch]$SourceOnly,
-    [switch]$ClaudeRefreshOnly
+    [switch]$ClaudeRefreshOnly,
+    [switch]$WorkStatusOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -131,10 +132,12 @@ $probeSource = @'
 using System;
 using System.Collections;
 using System.IO;
+using System.IO.Pipes;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.Loader;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -169,6 +172,13 @@ internal static class PacingProbe
                 return File.Exists(path) ? AssemblyLoadContext.Default.LoadFromAssemblyPath(path) : null;
             };
             _app = Assembly.LoadFrom(args[0]);
+            if (args.Skip(2).Contains("work-status"))
+            {
+                object work = CheckWorkObservations().GetAwaiter().GetResult();
+                CheckWorkUi(work);
+                Console.WriteLine($"PASS: {_passed} synthetic work-status checks; isolated pipe, preferences and WebView profile.");
+                return 0;
+            }
             if (args.Length == 2)
             {
                 CheckExamples();
@@ -194,6 +204,268 @@ internal static class PacingProbe
     }
 
     private static Type TypeOf(string name) => _app.GetType("UsageViewer." + name, true)!;
+
+    private static async Task<object> CheckWorkObservations()
+    {
+        object store = New("Services.WorkStatusStore");
+        object SnapshotAt(DateTimeOffset at) => Invoke(store, "Snapshot", at);
+        object ProviderAt(string name, DateTimeOffset at) => Get(SnapshotAt(at), name)!;
+        object Provider(string name) => Enum.Parse(TypeOf("Models.WorkProvider"), name);
+        DateTimeOffset at = Start;
+
+        async Task<object?> Read(string provider, string session, string eventName, string? turn = null, string? agent = null)
+        {
+            string payload = JsonSerializer.Serialize(new
+            {
+                session_id = session, hook_event_name = eventName, turn_id = turn, agent_id = agent,
+                prompt = "fixture_private_prompt", cwd = "Z:/fixture-private-path", notification_type = "permission_prompt"
+            });
+            using MemoryStream input = new MemoryStream(Encoding.UTF8.GetBytes(payload));
+            Task pending = (Task)Static("Services.WorkStatusHook", "ReadAsync", input, Provider(provider), at,
+                                      CancellationToken.None);
+            await pending;
+            return Get(pending, "Result");
+        }
+
+        async Task Signal(string provider, string session, string eventName, string? turn = null)
+        {
+            at = at.AddSeconds(1);
+            object? observation = await Read(provider, session, eventName, turn);
+            Check(observation != null, "known hook produces minimized observation: " + eventName);
+            Invoke(store, "Observe", observation);
+        }
+
+        Check(Get(ProviderAt("Codex", at), "Coverage")!.ToString() == "NotConnected" &&
+              Get(SnapshotAt(at), "Running") == null, "no signal is not zero");
+        await Signal("Codex", "codex-session-ready", "SessionStart");
+        Check(Get(ProviderAt("Codex", at), "Coverage")!.ToString() == "AwaitingSignal" &&
+              Get(ProviderAt("Codex", at), "Running") == null, "session start does not claim progress or zero");
+        object runningCodex = (await Read("Codex", "codex-session-alpha", "UserPromptSubmit", "turn-a"))!;
+        object runningClaude = (await Read("Claude", "claude-session-alpha", "UserPromptSubmit"))!;
+        string minimized = JsonSerializer.Serialize(runningCodex);
+        Check(!minimized.Contains("codex-session-alpha") && !minimized.Contains("turn-a") &&
+              !minimized.Contains("fixture_private") && !minimized.Contains("fixture-private-path"), "only hashed keys cross IPC");
+        await Task.WhenAll(Task.Run(() => Invoke(store, "Observe", runningCodex)),
+                           Task.Run(() => Invoke(store, "Observe", runningCodex)),
+                           Task.Run(() => Invoke(store, "Observe", runningClaude)));
+        await Signal("Codex", "codex-session-beta", "UserPromptSubmit", "turn-b");
+        Check(Get(await Read("Claude", "claude-session-alpha", "UserPromptSubmit") ?? throw new CheckException("prompt"),
+                  "Signal")!.ToString() == "Running", "Claude main prompt accepted");
+        Check(await Read("Claude", "child-session", "UserPromptSubmit", agent: "agent-fixture") == null &&
+              await Read("Claude", "claude-session-alpha", "SubagentStop", agent: "agent-fixture") == null &&
+              await Read("Codex", "codex-session-alpha", "SubagentStart", "turn-a", "agent-fixture") == null &&
+              await Read("Codex", "codex-session-alpha", "PreModelRequest", "turn-a", "agent-fixture") == null,
+              "child events cannot replace top-level state or inflate counts");
+        Check((bool)Static("Services.WorkStatusHook", "IsLocalClaude", "1", null) &&
+              !(bool)Static("Services.WorkStatusHook", "IsLocalClaude", null, null) &&
+              !(bool)Static("Services.WorkStatusHook", "IsLocalClaude", "1", "true"), "explicit desktop local Claude scope");
+        await Signal("Codex", "codex-session-wait", "UserPromptSubmit", "turn-w");
+        await Signal("Codex", "codex-session-wait", "PermissionRequest", "turn-w");
+        object sample = SnapshotAt(at);
+        Check((int?)Get(sample, "Running") == 3 && (int?)Get(sample, "Waiting") == 1 &&
+              (int?)Get(Get(sample, "Codex")!, "Running") == 2 && (int?)Get(Get(sample, "Claude")!, "Running") == 1,
+              "duplicate/parallel session count: Codex two plus separate waiting, Claude one");
+        await Signal("Codex", "codex-session-wait", "PostToolUse", "turn-w");
+        Check((int?)Get(SnapshotAt(at), "Running") == 3, "an unrelated tool result cannot clear approval waiting");
+        await Signal("Codex", "codex-session-wait", "PreModelRequest", "turn-w");
+        Check((int?)Get(SnapshotAt(at), "Running") == 4, "the next main model request resumes waiting turn");
+        await Signal("Codex", "codex-session-alpha", "Stop", "turn-a");
+        Invoke(store, "Observe", runningCodex);
+        await Signal("Codex", "codex-session-alpha", "PostToolUse", "turn-a");
+        Check((int?)Get(SnapshotAt(at), "Running") == 3, "late duplicate or tool result cannot resurrect a stopped turn");
+        await Signal("Codex", "codex-session-alpha", "PreModelRequest", "turn-a");
+        Check((int?)Get(SnapshotAt(at), "Running") == 4, "real additional request observes a Stop continuation");
+        await Signal("Codex", "codex-session-alpha", "Interrupt", "turn-a");
+        await Signal("Codex", "codex-session-alpha", "UserPromptSubmit", "turn-next");
+        await Signal("Codex", "codex-session-alpha", "Stop", "turn-a");
+        Check((int?)Get(SnapshotAt(at), "Running") == 4, "late Stop for previous Codex turn does not end the new turn");
+        await Signal("Codex", "codex-session-alpha", "Interrupt", "turn-next");
+        await Signal("Codex", "codex-session-beta", "SessionEnd");
+        await Signal("Codex", "codex-session-wait", "Stop", "turn-w");
+        Check(await Read("Codex", "codex-session-alpha", "PostModelRequest", "turn-next") == null,
+              "per-attempt Codex result is not a terminal turn receipt");
+        Check(await Read("Claude", "claude-session-alpha", "PermissionRequest") == null &&
+              await Read("Claude", "claude-session-alpha", "Interrupt") == null,
+              "Claude speculative permission or unsupported interrupt is not treated as a confirmed transition");
+        await Signal("Claude", "claude-session-alpha", "Notification");
+        Check((int?)Get(SnapshotAt(at), "Waiting") == 1 && (int?)Get(SnapshotAt(at), "Running") == 0,
+              "confirmed waiting is separate from confirmed zero progress");
+        await Signal("Claude", "claude-session-alpha", "PostToolBatch");
+        Check((int?)Get(SnapshotAt(at), "Running") == 1, "fully resolved Claude tool batch observes resumed progress");
+        await Signal("Claude", "claude-session-alpha", "StopFailure");
+        Check((int?)Get(SnapshotAt(at), "Running") == 0 && (int?)Get(SnapshotAt(at), "Waiting") == 0,
+              "finished, cancellation, failure and session exit produce observed zero");
+        await Signal("Claude", "claude-unanswered", "UserPromptSubmit");
+        at = at.AddMinutes(11);
+        await Signal("Claude", "claude-other", "Stop");
+        Check(Get(ProviderAt("Claude", at), "Coverage")!.ToString() == "Stale" &&
+              Get(SnapshotAt(at), "Running") == null, "a different Stop cannot turn an expired running session into zero");
+        await Signal("Claude", "claude-fresh", "UserPromptSubmit");
+        Check((int?)Get(SnapshotAt(at), "Running") == 1 && (bool)Get(SnapshotAt(at), "IsPartial")! &&
+              Get(ProviderAt("Claude", at), "Coverage")!.ToString() == "Partial", "fresh subset only, with expired session held unknown");
+        object disconnected = New("Models.WorkObservation", Provider("Claude"), Enum.Parse(TypeOf("Models.WorkSignal"),
+                                  "Disconnected"), at.AddSeconds(1), null, null);
+        Invoke(store, "Observe", disconnected);
+        Invoke(store, "Observe", runningClaude);
+        Check(Get(ProviderAt("Claude", at.AddSeconds(1)), "Coverage")!.ToString() == "Disconnected" &&
+              Get(SnapshotAt(at.AddSeconds(1)), "Running") == null, "disconnect clears counts and invalidates late messages");
+
+        object pipeStore = New("Services.WorkStatusStore");
+        string pipeName = "UsageViewer.WorkStatus.fixture." + Guid.NewGuid().ToString("N");
+        object listener = New("Services.WorkStatusCollector", pipeStore, pipeName);
+        using CancellationTokenSource cancel = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        Task listening = (Task)Invoke(listener, "ListenAsync", cancel.Token);
+        try
+        {
+            using (NamedPipeClientStream raw = new NamedPipeClientStream(".", pipeName, PipeDirection.Out,
+                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
+            {
+                await raw.ConnectAsync(cancel.Token);
+                await raw.WriteAsync(new byte[513], cancel.Token);
+            }
+            at = DateTimeOffset.UtcNow;
+            object frame = (await Read("Codex", "only-in-fixture", "UserPromptSubmit", "pipe-turn"))!;
+            await (Task)Static("Services.WorkStatusCollector", "SendAsync", pipeName, frame, cancel.Token);
+            for (int index = 0; index < 100 && Get(Invoke(pipeStore, "Snapshot", DateTimeOffset.UtcNow), "Running") == null; index++)
+            {
+                await Task.Delay(20, cancel.Token);
+            }
+            Check((int?)Get(Invoke(pipeStore, "Snapshot", DateTimeOffset.UtcNow), "Running") == 1,
+                  "oversize frame rejected, real isolated pipe accepts normalized hook frame");
+        }
+        finally
+        {
+            cancel.Cancel();
+            await listening.WaitAsync(TimeSpan.FromSeconds(3));
+        }
+
+        return sample;
+    }
+
+    private static void CheckWorkUi(object sample)
+    {
+        string preferencesPath = Path.Combine(_root, "work-view.json");
+        File.WriteAllText(preferencesPath, "{\"ShowTopBar\":false,\"AlertSoundEnabled\":false}");
+        object preferences = New("Services.PopupPreferencesStore", preferencesPath);
+        object initial = Invoke(preferences, "Load");
+        Check(!(bool)Get(initial, "ShowTotalWorkCount")!, "old preferences default to app-by-app");
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        object codex = Snapshot(now, Bucket("work-codex", Window(2, 300, now.AddHours(3))));
+        object claude = Snapshot(now, Bucket("work-claude", Window(99.9, 300, now.AddHours(3))));
+        Array installed = ArrayOf("Services.DetectedAiApp", New("Services.DetectedAiApp", "codex", "Codex", true),
+                                 New("Services.DetectedAiApp", "claude", "Claude", true));
+        using Form bar = (Form)New("UI.TopUsageBar");
+        Invoke(bar, "ApplyPreferences", initial);
+        Size nominal = bar.Size;
+        float scale = bar.DeviceDpi / 96f;
+        Check(nominal.Width == (int)(264 * scale) && nominal.Height == (int)(32 * scale), "native 264×32 DIP bounds");
+        Invoke(bar, "SetUsage", installed, codex, null, claude, null, false, null);
+        var alerts = (IDictionary)bar.GetType().GetField("_alertLevels", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(bar)!;
+        string alert = alerts["Codex"]!.ToString()!;
+        Check(alert != "None", "synthetic low quota still raises bar highlight");
+        object large = New("Models.WorkStatus", New("Models.ProviderWorkStatus", Enum.Parse(TypeOf("Models.WorkCoverage"), "Current"), 1203, 500),
+                           Get(sample, "Claude"));
+        foreach (bool total in new[] { false, true })
+        {
+            foreach (int width in new[] { nominal.Width, (int)(190 * scale) })
+            {
+                bar.Width = width;
+                Invoke(bar, "SetWorkStatus", large, total);
+                Rectangle left = (Rectangle)Invoke(bar, "GetMetricBounds", 0);
+                Rectangle right = (Rectangle)Invoke(bar, "GetMetricBounds", 1);
+                Rectangle button = (Rectangle)Invoke(bar, "GetTotalWorkBounds");
+                Rectangle appBadge = (Rectangle)Invoke(bar, "GetAppWorkBounds", left, 1203);
+                string? Hit(int x) => (string?)Invoke(bar, "GetProviderAt", new Point(x, bar.Height / 2));
+                Check(left.Right == right.Left && Hit(left.Right - 1) == "codex" && Hit(right.Left) == "claude" &&
+                      Hit(0) == null && Hit(bar.Width - 1) == null && appBadge.Right == left.Right,
+                      "nonoverlapping hit regions preserve grip, arrow and providers");
+                Check(total ? right.Right == button.Left && Hit(button.Left) == "work" && Hit(button.Right - 1) == "work" :
+                              Hit(appBadge.Left) == "codex" && Hit(button.Left) == "claude", "mode-specific badge hit target");
+                using Bitmap bitmap = new Bitmap(bar.Width, bar.Height);
+                bar.DrawToBitmap(bitmap, bar.ClientRectangle);
+                Check(alerts["Codex"]!.ToString() == alert && bar.AccessibleName!.Contains("2%") &&
+                      bar.AccessibleName.Contains("99.9%"), "work counts preserve usage metrics and low-quota alert state");
+            }
+        }
+        Check((string)Invoke(bar, "FormatWorkCount", 1203) == "999+" && Invoke(bar, "FormatWorkCount", 0) == null &&
+              (string)Invoke(bar, "FormatWorkCount", 123) == "123", "compact badge clamps large values only and never displays zero");
+
+        ConfigureWebView();
+        Environment.SetEnvironmentVariable("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--disable-background-networking --no-first-run");
+        using Form popup = (Form)New("UI.UsagePopup", preferences, Path.Combine(_root, "work-popup-profile"));
+        popup.Opacity = 0;
+        Invoke(popup, "SetDetectedApps", installed);
+        Invoke(popup, "SetState", codex, false, null, claude, null, false, null, null, null);
+        Invoke(popup, "SetWorkStatus", sample);
+        WebView2 browser = (WebView2)popup.Controls[0];
+        Exception? failure = null;
+        Rectangle dock = new Rectangle(bar.Location, nominal);
+        popup.Shown += async (_, _) =>
+        {
+            TaskCompletionSource<bool>? browserExited = null;
+            try
+            {
+                async Task WaitFor(string expression, string label)
+                {
+                    for (int attempt = 0; attempt < 120; attempt++)
+                    {
+                        if (browser.CoreWebView2 != null && await ScriptBool(browser, expression))
+                        {
+                            Check(popup.Visible, label);
+                            return;
+                        }
+                        await Task.Delay(100);
+                    }
+                    Check(false, label);
+                }
+
+                await WaitFor("document.querySelector('[data-tab=work][aria-pressed=true]')!==null && document.body.innerText.includes('확인된 대기 1건') && document.body.innerText.includes('3건')",
+                              "total target opens actual isolated work tab");
+                browserExited = new TaskCompletionSource<bool>();
+                browser.CoreWebView2.Environment.BrowserProcessExited += (_, _) => browserExited.TrySetResult(true);
+                await browser.ExecuteScriptAsync("document.querySelector('[data-work-total=true]').click()");
+                await WaitFor("document.querySelector('[data-work-total=true][aria-pressed=true]')!==null && document.querySelector('[data-tab=work][aria-pressed=true]')!==null",
+                              "view mode preserves open work tab");
+                object restored = Invoke(New("Services.PopupPreferencesStore", preferencesPath), "Load");
+                Check((bool)Get(restored, "ShowTotalWorkCount")! && !(bool)Get(restored, "AlertSoundEnabled")!,
+                      "mode persisted without changing existing alert preference");
+                Invoke(popup, "ShowBelow", dock, "codex");
+                await WaitFor("document.querySelector('[data-provider=codex][aria-pressed=true]')!==null && document.querySelector('.uv-work-line').innerText.includes('진행 2건 · 대기 1건') && document.body.innerText.includes('2%')",
+                              "Codex target opens usage and one-line work status without hiding popup");
+                Check(await ScriptBool(browser, "(()=>{let line=document.querySelector('.uv-work-line');return line.clientHeight<=parseFloat(getComputedStyle(line).lineHeight)+1 && document.body.innerText.includes('레드 얼럿')})()"),
+                      "work status fits one line alongside the existing low-quota notice");
+                Invoke(popup, "ShowBelow", dock, "claude");
+                await WaitFor("document.querySelector('[data-provider=claude][aria-pressed=true]')!==null && document.querySelector('.uv-work-line').innerText.includes('진행 1건') && document.body.innerText.includes('99.9%')",
+                              "Claude target opens independent usage without hiding popup");
+                await browser.ExecuteScriptAsync("document.querySelector('[data-work-total=false]').click()");
+                await WaitFor("document.querySelector('[data-work-total=false][aria-pressed=true]')!==null && document.querySelector('[data-provider=claude][aria-pressed=true]')!==null",
+                              "app-by-app mode preserves active service tab");
+                Invoke(popup, "SetWorkStatus", large);
+                await browser.ExecuteScriptAsync("document.querySelector('[data-tab=work]').click()");
+                await WaitFor("document.body.innerText.includes('1204건') && document.documentElement.scrollWidth<=innerWidth && [...document.querySelectorAll('.uv-work-row')].every(e=>e.scrollWidth<=e.clientWidth+1)",
+                              "actual docked WebView fits full four-digit counts in work detail");
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+            finally
+            {
+                browser.Dispose();
+                if (browserExited != null)
+                {
+                    await Task.WhenAny(browserExited.Task, Task.Delay(10000));
+                }
+                Invoke(popup, "CloseForExit");
+            }
+        };
+        Invoke(popup, "ShowBelow", dock, "work");
+        Application.Run(popup);
+        if (failure != null)
+        {
+            throw failure;
+        }
+    }
     private static object New(string name, params object?[] args) => Activator.CreateInstance(TypeOf(name), args)!;
     private static object? Get(object value, string property) => value.GetType().GetProperty(property)!.GetValue(value);
     private static object Invoke(object target, string method, params object?[] args) => target.GetType()
@@ -1922,12 +2194,17 @@ internal static class PacingProbe
         }
     }
 
-    private static void CheckRendering()
+    private static void ConfigureWebView()
     {
         NativeLibrary.SetDllImportResolver(typeof(CoreWebView2Environment).Assembly, (name, assembly, search) =>
             name == "WebView2Loader.dll" ? NativeLibrary.Load(Path.Combine(Path.GetDirectoryName(_app.Location)!,
                 "runtimes", "win-" + RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant(),
                 "native", name)) : IntPtr.Zero);
+    }
+
+    private static void CheckRendering()
+    {
+        ConfigureWebView();
         // Invisible, isolated fixture host. Never initialize the user's app or its WebView profile.
         using Form host = new Form
         {
@@ -2122,6 +2399,7 @@ try {
     }
     $probeArguments = @($assemblyPath, $tempRoot)
     if ($ClaudeRefreshOnly) { $probeArguments += 'claude-refresh' }
+    if ($WorkStatusOnly) { $probeArguments += 'work-status' }
     & $DotNetPath exec --runtimeconfig (Join-Path $buildPath 'UsageViewer.runtimeconfig.json') $probePath @probeArguments
     if ($LASTEXITCODE -ne 0) { throw 'Synthetic usage-pacing checks failed.' }
 }
