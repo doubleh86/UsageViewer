@@ -13,6 +13,7 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
 .uv-provider-status{margin:0 0 8px;overflow-wrap:anywhere}.uv-provider-status .uv-connect{display:block}
 .uv-track{position:relative;overflow:visible}.uv-track>span{border-radius:2px}.uv-daily-marker{position:absolute;left:0;top:-3px;width:2px;height:10px;background:#edf2f8;border-radius:1px;transform:translateX(-50%);box-shadow:0 0 0 1px #171d25}
 .uv-credit-confirmed{color:#7aaeff}.uv-credit-detail{color:#a8b5c6;font-size:11px;margin-top:3px;overflow-wrap:anywhere}.uv-credit-notice{margin:7px 0;padding:6px 8px;border-radius:5px;background:#202c3b;color:#c2d8f6;font-size:11px;overflow-wrap:anywhere}.uv-credit-notice.uv-credit-confirmed{background:#172d4c;color:#a9ceff}
+.uv-work-line,.uv-work-scope{color:#a8b5c6;font-size:11px;margin:5px 0;overflow-wrap:anywhere}.uv-work-row{padding:6px 0;border-top:1px solid #303946;overflow-wrap:anywhere}.uv-work-row strong{color:#edf2f8}.uv-work-count{font-size:20px;color:#a0efdc}.uv-work-mode{display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap}.uv-work-mode .uv-tabs{flex-shrink:0}
 </style></head>
 <body><main id="app" class="uv-window" aria-label="AI 사용량"><header><strong>Usage</strong></header><div class="uv-empty">설치된 AI 확인 중…</div></main>
 <script>
@@ -27,7 +28,31 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
  const refreshIcon='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7a9 9 0 1 0 1 5M20 3v5h-5"/></svg>';
  const closeIcon='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>';
  function actions(){return '<div class="uv-actions"><button type="button" data-action="refresh" aria-label="새로고침" aria-busy="'+(state.refreshing===true)+'">'+refreshIcon+'</button><button type="button" data-action="hide" aria-label="숨기기">'+closeIcon+'</button></div>'}
- function tabs(){return '<div class="uv-tabs" role="group" aria-label="서비스 선택">'+state.providers.map(p=>'<button type="button" data-provider="'+esc(p.id)+'" aria-pressed="'+(p.id===state.activeProvider)+'">'+esc(p.name)+'</button>').join('')+'</div>'}
+ function tabs(){
+  const usage=state.showBoth||!state.providers.length?'<button type="button" data-tab="usage" aria-pressed="'+!state.workTab+'">Usage</button>':state.providers.map(p=>'<button type="button" data-provider="'+esc(p.id)+'" aria-pressed="'+(!state.workTab&&p.id===state.activeProvider)+'">'+esc(p.name)+'</button>').join('');
+  return '<div class="uv-tabs" role="group" aria-label="상세 탭">'+usage+'<button type="button" data-tab="work" aria-pressed="'+(state.workTab===true)+'">작업</button></div>';
+ }
+ function workText(work){
+  let label=Number.isInteger(work.running)?(work.partial?'관측 진행 ':'진행 ')+work.running+'건':work.status;
+  if(work.waiting>0)label+=' · 대기 '+work.waiting+'건';
+  return label;
+ }
+ function providerWork(p){return p.work?'<div class="uv-work-line">작업 · '+esc(workText(p.work))+'</div>':''}
+ function workPanel(){
+  const work=state.work;
+  if(!work)return '<section class="uv-tab-panel uv-empty">작업 신호 확인 중</section>';
+  const running=Number.isInteger(work.running)?'<strong class="uv-work-count">'+work.running+'건</strong>':esc(work.status);
+  const waiting=work.waiting>0?'<div class="uv-work-line">확인된 대기 '+work.waiting+'건 · 진행 합계 제외</div>':'';
+  const scope='<div class="uv-work-scope">공식 훅을 연결한 로컬 세션의 최근 관측만 표시합니다.</div>';
+  return '<section class="uv-tab-panel" aria-label="작업 현황"><div class="uv-line"><span>'+(work.partial?'연동된 작업 중':'전체 진행')+'</span><span>'+running+'</span></div>'+waiting+scope+
+    '<div class="uv-line uv-work-row"><strong>Codex</strong><span>'+esc(workText(work.codex))+'</span></div>'+
+    '<div class="uv-line uv-work-row"><strong>Claude</strong><span>'+esc(workText(work.claude))+'</span></div></section>';
+ }
+ function workMode(){
+  return '<div class="uv-work-mode"><span>상단 작업 수</span><div class="uv-tabs" role="group" aria-label="상단 작업 수">'+
+    '<button type="button" data-work-total="false" aria-pressed="'+!state.totalWorkMode+'">앱별</button>'+
+    '<button type="button" data-work-total="true" aria-pressed="'+(state.totalWorkMode===true)+'">전체</button></div></div>';
+ }
  function brand(p){return '<div class="uv-brand"><span class="uv-mark uv-'+esc(p.id)+'">'+(p.id==='codex'?'C':p.id==='claude'?'✳':'·')+'</span><strong>'+esc(p.name)+'</strong><span class="uv-muted">'+esc(p.plan||'감지됨')+'</span></div>'}
  function meter(p,w){
   if(w.invalid||w.expired)return '<div class="uv-small uv-muted">'+(w.invalid?'잔여량 확인 필요':p.web?'초기화 후 새 값 확인 중':'새 수신 필요')+'</div>';
@@ -71,22 +96,26 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
  function empty(p){return '<div class="uv-empty">'+esc(p.error||'사용량 확인 중…')+'</div>'+(p.canConnect?'<button type="button" class="uv-connect" data-action="connect" data-id="'+esc(p.id)+'">'+(p.id==='codex'?'ChatGPT 연결하기':'연결하기')+'</button>':'')}
  function combined(p){
   if(!p.supported)return '<section class="uv-provider uv-unsupported">'+brand(p)+'<div class="uv-muted uv-small">감지됨 · 사용량 연동 미지원</div></section>';
-  return '<section class="uv-provider '+(p.stale?'uv-stale':'')+'">'+brand(p)+coverage(p)+usage(p,false)+'</section>';
+  return '<section class="uv-provider '+(p.stale?'uv-stale':'')+'">'+brand(p)+providerWork(p)+coverage(p)+usage(p,false)+'</section>';
  }
  function tabbed(p){
   if(!p.supported)return '<section class="uv-tab-panel">'+empty(p)+'</section>';
-  return '<section class="uv-tab-panel '+(p.stale?'uv-stale':'')+'">'+coverage(p)+usage(p,true)+'</section>';
+  return '<section class="uv-tab-panel '+(p.stale?'uv-stale':'')+'">'+providerWork(p)+coverage(p)+usage(p,true)+'</section>';
  }
  function render(){
   app.classList.toggle('uv-docked',state.docked===true);
   if(!state.providers.some(p=>p.id===state.activeProvider))state.activeProvider=state.providers[0]?.id||'codex';
   const selected=state.providers.find(p=>p.id===state.activeProvider);
-  app.innerHTML='<header>'+(state.showBoth?'<strong>Usage</strong>':tabs())+actions()+'</header>'+(state.providers.length?(state.showBoth?state.providers.map(combined).join(''):tabbed(selected)):'<div class="uv-empty">지원하는 AI 설치를 찾지 못했습니다. 설치 후 새로고침해 주세요.</div>')+'<footer><span aria-live="polite">'+esc(state.showBoth?state.providers.filter(p=>p.updated).map(p=>p.name+' '+p.updated).join(' · ')||'자동 탐지 완료':selected?.updated?selected.name+' '+selected.updated:'연결 상태 확인')+'</span><span>남은 비율 기준</span></footer><div class="uv-controls"><label class="uv-view-toggle"><input type="checkbox" id="show-both" '+(state.showBoth?'checked':'')+'>함께 보기</label><span class="uv-detected">'+state.providers.length+'개 감지</span></div>'+(state.preferencesError?'<div class="uv-warning">'+esc(state.preferencesError)+'</div>':'');
+  const panel=state.workTab?workPanel():state.providers.length?(state.showBoth?state.providers.map(combined).join(''):tabbed(selected)):'<div class="uv-empty">지원하는 AI 설치를 찾지 못했습니다. 설치 후 새로고침해 주세요.</div>';
+  const footer=state.workTab?'':'<span aria-live="polite">'+esc(state.showBoth?state.providers.filter(p=>p.updated).map(p=>p.name+' '+p.updated).join(' · ')||'자동 탐지 완료':selected?.updated?selected.name+' '+selected.updated:'연결 상태 확인')+'</span><span>남은 비율 기준</span>';
+  app.innerHTML='<header>'+tabs()+actions()+'</header>'+panel+'<footer>'+footer+'</footer><div class="uv-controls"><label class="uv-view-toggle"><input type="checkbox" id="show-both" '+(state.showBoth?'checked':'')+'>함께 보기</label><span class="uv-detected">'+state.providers.length+'개 감지</span></div>'+workMode()+(state.preferencesError?'<div class="uv-warning">'+esc(state.preferencesError)+'</div>':'');
   resize();
  }
  app.addEventListener('click',e=>{
   const button=e.target.closest('button');if(!button)return;
-  if(button.dataset.provider){state.activeProvider=button.dataset.provider;send({type:'provider',id:state.activeProvider});render();return}
+  if(button.dataset.provider){state.activeProvider=button.dataset.provider;state.workTab=false;send({type:'provider',id:state.activeProvider});render();return}
+  if(button.dataset.tab){state.workTab=button.dataset.tab==='work';send({type:'detail-tab',id:button.dataset.tab});render();return}
+  if(button.dataset.workTotal!==undefined){state.totalWorkMode=button.dataset.workTotal==='true';send({type:'work-mode',total:state.totalWorkMode});render();return}
   send({type:button.dataset.action,id:button.dataset.id});
  });
  app.addEventListener('toggle',e=>{if(e.target.matches('details[data-help]')){if(e.target.open)helpOpen.add(e.target.dataset.help);else helpOpen.delete(e.target.dataset.help);resize()}},true);

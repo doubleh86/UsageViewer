@@ -195,6 +195,35 @@ Codex 영역을 누르면 Codex, Claude 영역을 누르면 Claude 탭 상세가
 드래그하는 동안 작업 창의 포커스를 유지하며, 상세 보기를 클릭할 때만 활성화한다.
 보기 방식·선택 탭·상단 표시·항상 앞 옵션·모니터·가로 위치는 같은 `view.json`에 저장한다.
 
+## 상단 작업 수
+
+264×32 DIP 상단 바의 **앱별** 모드는 각 사용량 옆에 진행 중인 세션 수를 표시한다. **전체** 모드는 오른쪽 합계 배지 하나를 표시하며, 누르면 **작업** 탭이 열린다. Codex/Claude 영역은 해당 사용량 상세를 연다. 상세 하단 **상단 작업 수**에서 보기를 바꿔도 열린 탭은 유지되고, 선택한 보기 모드는 다음 실행에 복원된다. 상단에는 0을 표시하지 않으며, 큰 수는 `999+`로 줄여도 상세에는 정확한 관측 건수를 표시한다.
+
+### 공식 훅 수동 연결 (선택)
+
+사용량 연결과 별개다. 앱이 훅이나 제공자 설정을 자동으로 설치·변경하지 않는다. 관측할 **로컬** 세션의 설정에만 아래 명령 훅을 추가하고, 같은 Windows 사용자·로그온 세션에서 UsageViewer를 실행한다. 경로는 실제 로컬 `UsageViewer.exe` 절대 경로로 바꾼다. 기존 설정과 병합하고, 훅의 신뢰·조직 정책을 그대로 따른다. 모델 실행·승인 결정을 추가하는 훅은 필요하지 않다.
+
+- **Codex:** [공식 `hooks.json` 설정](https://learn.chatgpt.com/docs/hooks)을 참고해 신뢰된 로컬 프로젝트의 `.codex/hooks.json`에 예시 이벤트를 넣고, 데스크톱 **Settings → Hooks**에서 직접 검토한다. Windows PowerShell 세션의 `SessionStart` 예시이며, 같은 핸들러를 `UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, `PreModelRequest`, `Stop`, `Interrupt`, `SessionEnd`에도 등록한다. 사용 중인 빌드에서 노출하는 이벤트만 사용할 수 있다. 이 설정이 공유되는 프로젝트에서 CLI/IDE를 사용하면 그 로컬 훅도 전달될 수 있으므로, 데스크톱만 관측하려면 해당 프로젝트에서만 설정을 사용한다. UsageViewer는 데스크톱의 App Server에 접속하거나 별도 한도 조회 서버의 스레드를 사용하지 않는다.
+
+  ```json
+  {"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"& 'C:\\path\\UsageViewer.exe' --work-status-hook codex | Out-Null","timeout":2}]}]}}
+  ```
+
+- **Claude:** 데스크톱 **Code → Local**의 [저장된 로컬 환경](https://code.claude.com/docs/en/desktop#set-environment-variables-for-local-sessions)에만 `USAGEVIEWER_CLAUDE_DESKTOP_LOCAL=1`을 추가한다. 시스템·사용자 공용 환경, CLI/IDE, SSH·클라우드에는 지정하지 않는다. [공식 명령 훅](https://code.claude.com/docs/en/hooks#command-hook-fields)을 해당 프로젝트의 개인 설정 `.claude/settings.local.json`에 병합하거나, 정책상 필요하면 사용자 승인 [코드 플러그인](https://code.claude.com/docs/en/desktop#install-plugins)으로 넣는다. 아래 `Notification` 예시와 같은 핸들러를 `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `PostToolBatch`, `Stop`, `StopFailure`, `SessionEnd`에 등록한다(다른 키에서는 `matcher` 생략). 일반 Chat, Cowork, SSH·클라우드/원격 작업은 미연동이다. 훅이 실제 전달되는 Windows 로컬 Code 세션만 집계한다.
+
+  ```json
+  {"hooks":{"Notification":[{"matcher":"permission_prompt","hooks":[{"type":"command","command":"C:\\path\\UsageViewer.exe","args":["--work-status-hook","claude"],"timeout":2}]}]}}
+  ```
+
+훅 설치 후 첫 신호 전에는 `UsageViewer.exe --work-status-source codex waiting` (또는 `claude waiting`)으로 수신 대기를 표시할 수 있다. 훅을 제거하거나 끈 후 `waiting` 대신 `disconnected`를 사용하면 관측이 초기화되고 단절이 표시된다. 두 명령은 실행 중인 표시기에만 전달하며 앱이나 세션을 새로 열지 않는다.
+
+### 무엇을 셀 수 있나요?
+
+- **Codex:** 메인 입력으로 진행을 관측하며 `PermissionRequest`로 관측된 승인 대기를 별도 표시한다. 같은 턴의 후속 모델 요청은 재개를, `Interrupt`는 활성 턴 취소를, `SessionEnd`는 전달된 세션 종료를 뜻한다. `Stop`은 응답 종료이지 세션 종료가 아니다. 모델 요청 단위 실패는 재시도와 구별할 수 없어 최종 실패·종료로 세지 않는다.
+- **Claude:** 메인 입력으로 진행을 관측한다. `Notification: permission_prompt`로 전달된 승인 대기만 센다(즉시 처리된 승인이나 다른 대기는 표시되지 않을 수 있음). 다음 도구 배치가 완료되면 재개를, `Stop`은 응답 종료를, `StopFailure`는 API 오류로 끝난 턴을, `SessionEnd`는 전달된 세션 종료를 뜻한다. 사용자 취소는 `Stop`을 보내지 않으므로 취소를 추정하지 않는다. 다른 훅이 입력을 차단하거나 `Stop` 뒤에 모델을 계속 돌리면 중간 상태는 즉시 알 수 없다.
+- 누락·강제 종료·자동으로 알 수 없는 단절은 영구 진행 또는 0으로 취급하지 않는다. 마지막 관련 신호는 10분 뒤 만료된다. 두 제공자나 세션 중 일부만 유효하면 **연동된 작업 중**으로 표시한다. 진행 합계에서 확인된 대기와 하위 에이전트를 제외하고, 최근 확실한 관측이 있는 범위에만 상세 0을 표시한다.
+- 원본 훅 이벤트는 로컬 프로세스 메모리에서만 읽는다. 중복 방지용 해시, 상태, 시각만 현재 사용자 전용 로컬 파이프로 전달하며 재시작하면 사라진다. 메시지·프롬프트·작업 경로·인증 정보는 저장·기록·외부 전송하지 않는다. 사용량·크레딧·잔량 경고 계산에 작업 상태를 사용하지 않는다.
+
 ## 잔여량 경고
 
 Codex·Claude의 유효한 5시간/주간 등 모든 한도를 확인한다. 잔여 10% 이하는 붉은 주의 표시와

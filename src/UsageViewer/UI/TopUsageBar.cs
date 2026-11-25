@@ -19,6 +19,8 @@ internal sealed class TopUsageBar : Form
     private readonly Font _textFont = new Font("Segoe UI", 9.75f);
     private readonly List<TopBarMetric> _metrics = new List<TopBarMetric>();
     private readonly Dictionary<string, UsageAlertLevel> _alertLevels = new Dictionary<string, UsageAlertLevel>();
+    private WorkStatus _work = WorkStatus.Empty;
+    private bool _showTotalWorkCount;
     private bool _enabled;
     private bool _alwaysOnTop;
     private IntPtr _lastTopMostForeground;
@@ -94,10 +96,44 @@ internal sealed class TopUsageBar : Form
             _metrics.Add(CreateMetric("Claude", claude, claudeError, claudeStale, claudeWeb));
         }
 
-        AccessibleName = _metrics.Count == 0 ? "사용량 조회 대기" :
-                         string.Join(" / ", _metrics.Select(metric =>
-                             $"{metric.Provider} {metric.Period} {metric.Value}"));
+        UpdateAccessibleName();
         Invalidate();
+    }
+
+    public void SetWorkStatus(WorkStatus work, bool showTotal)
+    {
+        if (_work == work && _showTotalWorkCount == showTotal)
+        {
+            return;
+        }
+
+        _work = work;
+        _showTotalWorkCount = showTotal;
+        UpdateAccessibleName();
+        Invalidate();
+    }
+
+    private void UpdateAccessibleName()
+    {
+        string usage = _metrics.Count == 0 ? "사용량 조회 대기" : string.Join(" / ", _metrics.Select(metric =>
+            $"{metric.Provider} {metric.Period} {metric.Value}"));
+        if (_showTotalWorkCount == true)
+        {
+            string label = _work.IsPartial == true ? "연동된 작업 중" : "진행";
+            string summary = _work.Running > 0 ? $"{label} {_work.Running}건" :
+                             _work.Running == 0 ? "작업 상세" : _work.Status;
+            AccessibleName = $"{usage} / {summary}";
+
+            return;
+        }
+
+        AccessibleName = usage + string.Concat(_metrics.Select(metric =>
+        {
+            ProviderWorkStatus work = GetWorkStatus(metric);
+
+            return work.Running > 0 ? $" / {metric.Provider} 진행 {work.Running}건" :
+                   work.Running == null ? $" / {metric.Provider} {work.Status}" : "";
+        }));
     }
 
     private void SetAlertLevel(string provider, UsageSnapshot? snapshot, string? error, bool stale)
@@ -375,7 +411,7 @@ internal sealed class TopUsageBar : Form
     {
         float scale = DeviceDpi / 96f;
         int left = (int)(26 * scale);
-        int right = Width - (int)(22 * scale);
+        int right = _showTotalWorkCount == true ? GetTotalWorkBounds().Left : Width - (int)(22 * scale);
         int width = Math.Max(0, right - left);
         int x = left + width * index / _metrics.Count;
         int end = left + width * (index + 1) / _metrics.Count;
@@ -385,6 +421,11 @@ internal sealed class TopUsageBar : Form
 
     private string? GetProviderAt(Point point)
     {
+        if (_showTotalWorkCount == true && GetTotalWorkBounds().Contains(point) == true)
+        {
+            return "work";
+        }
+
         for (int index = 0; index < _metrics.Count; index++)
         {
             if (GetMetricBounds(index).Contains(point) == true)
@@ -394,6 +435,26 @@ internal sealed class TopUsageBar : Form
         }
 
         return null;
+    }
+
+    private Rectangle GetTotalWorkBounds()
+    {
+        float scale = DeviceDpi / 96f;
+        int right = Width - (int)(22 * scale);
+        int width = Math.Min((int)(46 * scale), Math.Max(0, right - (int)(26 * scale)) / 3);
+
+        return new Rectangle(right - width, 0, width, Height);
+    }
+
+    private ProviderWorkStatus GetWorkStatus(TopBarMetric metric) => metric.Provider == "Codex" ? _work.Codex : _work.Claude;
+
+    private Rectangle GetAppWorkBounds(Rectangle cell, int? count)
+    {
+        float scale = DeviceDpi / 96f;
+        int width = count == 0 || cell.Width < (int)(43 * scale) ? 0 :
+                    Math.Min(cell.Width / 3, (int)((count == null ? 15 : 34) * scale));
+
+        return new Rectangle(cell.Right - width, 0, width, Height);
     }
 
     protected override void OnMouseCaptureChanged(EventArgs e)
@@ -423,10 +484,10 @@ internal sealed class TopUsageBar : Form
         e.Graphics.DrawPath(border, outline);
         DrawGrip(e.Graphics, 10 * scale, scale);
         int left = (int)(26 * scale);
-        int right = Width - (int)(22 * scale);
+        int right = _showTotalWorkCount == true ? GetTotalWorkBounds().Left : Width - (int)(22 * scale);
         if (_metrics.Count == 0)
         {
-            DrawText(e.Graphics, "Usage · 조회 대기", new Rectangle(left, 0, right - left, Height), ForeColor);
+            DrawText(e.Graphics, "Usage · 조회 대기", new Rectangle(left, 0, Math.Max(0, right - left), Height), ForeColor);
         }
         else
         {
@@ -434,7 +495,6 @@ internal sealed class TopUsageBar : Form
             {
                 TopBarMetric metric = _metrics[index];
                 Rectangle cell = GetMetricBounds(index);
-                int cellWidth = cell.Width;
                 int x = cell.Left;
                 _alertLevels.TryGetValue(metric.Provider, out UsageAlertLevel level);
                 if (level != UsageAlertLevel.None)
@@ -461,20 +521,70 @@ internal sealed class TopUsageBar : Form
                                                        center.Y + (float)Math.Sin(angle) * 5 * scale));
                     }
                 }
-                string text = (level != UsageAlertLevel.None ? "! " : "") +
-                              (metric.Period.Length > 0 ? metric.Period + " " : "") + metric.Value;
-                DrawText(e.Graphics, text,
-                         new Rectangle(x + (int)(19 * scale), 0, cellWidth - (int)(21 * scale), Height),
+                ProviderWorkStatus work = GetWorkStatus(metric);
+                Rectangle badge = GetAppWorkBounds(cell, _showTotalWorkCount == true ? 0 : work.Running);
+                int textLeft = x + (int)(19 * scale);
+                Rectangle usage = new Rectangle(textLeft, 0,
+                    Math.Max(0, badge.Left - textLeft - (int)(2 * scale)), Height);
+                string warningPrefix = level != UsageAlertLevel.None ? "! " : "";
+                string text = warningPrefix + (metric.Period.Length > 0 ? metric.Period + " " : "") + metric.Value;
+                if (badge.Width > 0 && TextRenderer.MeasureText(e.Graphics, text, _textFont, Size.Empty,
+                        TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width > usage.Width)
+                {
+                    text = warningPrefix + metric.Value;
+                }
+
+                DrawText(e.Graphics, text, usage,
                          level != UsageAlertLevel.None ? Color.FromArgb(255, 185, 193) :
                          metric.NeedsAttention == true ? Color.FromArgb(175, 187, 204) : ForeColor);
+                if (badge.Width > 0)
+                {
+                    DrawWorkBadge(e.Graphics, badge, FormatWorkCount(work.Running) ?? "–", work.Running > 0);
+                }
+
                 if (index > 0)
                 {
-                    e.Graphics.DrawLine(border, x - 5 * scale, 9 * scale, x - 5 * scale, Height - 9 * scale);
+                    e.Graphics.DrawLine(border, x, 9 * scale, x, Height - 9 * scale);
                 }
             }
         }
 
+        if (_showTotalWorkCount == true)
+        {
+            string label = FormatWorkCount(_work.Running) ?? (_work.Codex.Coverage != _work.Claude.Coverage ? "작업 –" :
+                _work.Codex.Coverage switch
+                {
+                    WorkCoverage.NotConnected => "미연동",
+                    WorkCoverage.AwaitingSignal => "수신 대기",
+                    WorkCoverage.Stale => "오래됨",
+                    WorkCoverage.Disconnected => "단절",
+                    _ => "작업"
+                });
+            DrawWorkBadge(e.Graphics, GetTotalWorkBounds(), label, _work.Running > 0);
+        }
+
         DrawChevron(e.Graphics, Width - 14 * scale, scale);
+    }
+
+    private string? FormatWorkCount(int? count) => count > 999 ? "999+" : count > 0 ? count.ToString() : null;
+
+    private void DrawWorkBadge(Graphics graphics, Rectangle bounds, string text, bool active)
+    {
+        float scale = DeviceDpi / 96f;
+        int pad = (int)(2 * scale);
+        if (bounds.Width <= pad || bounds.Height <= pad)
+        {
+            return;
+        }
+
+        Rectangle button = new Rectangle(bounds.X, (int)(6 * scale), bounds.Width - pad, (int)(20 * scale));
+        using SolidBrush background = new SolidBrush(active == true ? Color.FromArgb(35, 71, 67) :
+                                                                       Color.FromArgb(44, 54, 67));
+        graphics.FillRectangle(background, button);
+        TextRenderer.DrawText(graphics, text, _textFont, button,
+            active == true ? Color.FromArgb(160, 239, 220) : Color.FromArgb(175, 187, 204),
+            TextFormatFlags.NoPadding | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+            TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
     }
 
     private void DrawGrip(Graphics graphics, float x, float scale)
@@ -502,8 +612,14 @@ internal sealed class TopUsageBar : Form
 
     private void DrawText(Graphics graphics, string text, Rectangle bounds, Color color)
     {
+        if (bounds.Width <= 0 || bounds.Height <= 0)
+        {
+            return;
+        }
+
         TextRenderer.DrawText(graphics, text, _textFont, bounds, color,
-                              TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                              TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter |
+                              TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
     }
 
     protected override void OnDpiChanged(DpiChangedEventArgs e)

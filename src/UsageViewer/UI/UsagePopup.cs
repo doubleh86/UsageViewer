@@ -21,6 +21,8 @@ internal sealed class UsagePopup : Form
     private IReadOnlyList<DetectedAiApp> _detected = Array.Empty<DetectedAiApp>();
     private ProviderUsageState _codex = new ProviderUsageState("Codex", null, null);
     private ProviderUsageState _claude = new ProviderUsageState("Claude", null, "한 번 연결하면 자동으로 갱신됩니다.");
+    private WorkStatus _work = WorkStatus.Empty;
+    private bool _showWorkTab;
     private bool _allowClose;
     private bool _ready;
     private bool _initializing;
@@ -95,6 +97,11 @@ internal sealed class UsagePopup : Form
 
     public void ShowBelow(Rectangle bar, string? providerId = null)
     {
+        if (providerId != null)
+        {
+            _showWorkTab = providerId == "work";
+        }
+
         if ((providerId == "codex" || providerId == "claude") &&
             (_preferences.ShowBoth == true || _preferences.ActiveProvider != providerId))
         {
@@ -107,9 +114,21 @@ internal sealed class UsagePopup : Form
         FitToScreen();
         UpdateWindowRegion();
         UpdateDocument();
-        Show();
+        if (Visible == false)
+        {
+            Show();
+        }
         FitToScreen();
         Activate();
+    }
+
+    public void SetWorkStatus(WorkStatus work)
+    {
+        if (_work != work)
+        {
+            _work = work;
+            UpdateDocument();
+        }
     }
 
     public void MoveBelow(Rectangle bar)
@@ -267,10 +286,25 @@ internal sealed class UsagePopup : Form
                     string? id = root.GetProperty("id").GetString();
                     if (id != null && (_detected.Any(app => app.Id == id) == true || id == "codex" || id == "claude"))
                     {
+                        _showWorkTab = false;
                         _preferences = _preferences with { ActiveProvider = id };
                         SavePreferences();
                         UpdateDocument();
                     }
+                    break;
+                case "detail-tab":
+                    string? tab = root.GetProperty("id").GetString();
+                    if (tab == "work" || tab == "usage")
+                    {
+                        _showWorkTab = tab == "work";
+                        UpdateDocument();
+                    }
+                    break;
+                case "work-mode":
+                    _preferences = _preferences with { ShowTotalWorkCount = root.GetProperty("total").GetBoolean() };
+                    SavePreferences();
+                    WindowPreferencesChanged?.Invoke(this, EventArgs.Empty);
+                    UpdateDocument();
                     break;
                 case "refresh":
                     RefreshRequested?.Invoke(this, EventArgs.Empty);
@@ -403,6 +437,8 @@ internal sealed class UsagePopup : Form
             {
                 id = app.Id,
                 name = app.Name,
+                work = app.Id == "codex" ? BuildWorkRow(_work.Codex) :
+                       app.Id == "claude" ? BuildWorkRow(_work.Claude) : null,
                 supported = app.UsageSupported,
                 canConnect = claudeWeb?.CanConnect ?? ((app.Id == "codex" || app.Id == "claude") &&
                              (snapshot == null || state.Error != null)),
@@ -439,11 +475,30 @@ internal sealed class UsagePopup : Form
             showBoth = _preferences.ShowBoth,
             docked = _dockBounds.HasValue,
             activeProvider = _preferences.ActiveProvider,
+            workTab = _showWorkTab,
+            totalWorkMode = _preferences.ShowTotalWorkCount,
+            work = new
+            {
+                running = _work.Running,
+                waiting = _work.Waiting,
+                partial = _work.IsPartial,
+                status = _work.Status,
+                codex = BuildWorkRow(_work.Codex),
+                claude = BuildWorkRow(_work.Claude)
+            },
             providers,
             refreshing = _refreshing,
             preferencesError = _preferencesError
         };
     }
+
+    private object BuildWorkRow(ProviderWorkStatus work) => new
+    {
+        running = work.Running,
+        waiting = work.Waiting > 0 ? work.Waiting : null,
+        status = work.Status,
+        partial = work.Coverage == WorkCoverage.Partial
+    };
 
     private void FitToScreen()
     {
