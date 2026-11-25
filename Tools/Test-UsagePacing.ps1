@@ -70,6 +70,28 @@ check(!render([provider('codex',[weekly('오늘 남은 권장량: 1.00%','')])])
 check(!render([provider('codex',[weekly('오늘 남은 권장량: 0.00%','')])]).includes('내일 예상'),'missing estimate is not zero');
 check(render([provider('codex',[weekly('오늘 몫 소진','내일 예상 권장량: 약 0.00% (참고)')])]).includes('약 0.00%'),'valid recommendation zero is displayable');
 check(render([provider('codex',[weekly('fixture','<img src=x onerror=bad()>')])]).includes('&lt;img'),'estimate text escaped');
+for(const id of ['codex','claude']) for(const both of [true,false]){
+    const row={...weekly(),remaining:19,dailyStartRemaining:48,dailyBoundaryRemaining:19};
+    const markup=render([provider(id,[row])],both,id);
+    check(markup.includes('class="uv-start-marker"')&&markup.includes('style="left:48%"'),'start marker stays beyond current fill '+id);
+    check(markup.includes('style="width:19%"')&&markup.includes('class="uv-daily-marker"')&&markup.includes('style="left:19%"'),'quota and daily boundary unchanged '+id);
+    check(markup.includes('오늘 시작 48%')&&markup.includes('권장선')&&markup.includes('오늘 첫 조회 기준'),'marker legend explains both meanings '+id);
+}
+for(const baseline of [0,100]){
+    check(render([provider('codex',[{...weekly(),remaining:0,dailyStartRemaining:baseline}])]).includes('style="left:'+baseline+'%"'),'exhausted quota keeps known start marker');
+}
+for(const baseline of [undefined,null,-1,101,NaN,Infinity]){
+    check(!render([provider('codex',[{...weekly(),dailyStartRemaining:baseline}])]).includes('class="uv-start-marker"'),'unknown or invalid baseline hidden');
+}
+for(const flag of ['invalid','expired','pacingReason']){
+    check(!render([provider('codex',[{...weekly(),dailyStartRemaining:48,[flag]:true}])]).includes('class="uv-start-marker"'),'held baseline hidden '+flag);
+}
+for(const flag of ['stale','error']){
+    check(!render([{...provider('codex',[{...weekly(),dailyStartRemaining:48}]),[flag]:true}]).includes('class="uv-start-marker"'),'failed provider hides baseline '+flag);
+}
+check(!render([provider('codex',[{...weekly(),weekly:false,dailyStartRemaining:48}])]).includes('class="uv-start-marker"'),'short limit has no daily baseline');
+const coincident=render([provider('codex',[{...weekly(),remaining:48,dailyStartRemaining:48,dailyBoundaryRemaining:48}])]);
+check(coincident.includes('class="uv-start-marker"')&&coincident.includes('class="uv-daily-marker"'),'coincident markers both retained');
 const creditProvider={...provider('codex',[{...weekly('주간 한도 소진 · 크레딧 잔액 보유',''),remaining:0,alert:'critical',creditBacked:true}]),credits:'62,000.25',creditLabel:'크레딧 차감 확인',creditConfirmed:true,creditDetail:'최근 조회보다 68.44 감소'};
 for(const both of [true,false]){
     const markup=render([creditProvider],both);
@@ -81,6 +103,7 @@ check(!render([{...creditProvider,error:'fixture'}]).includes('68.44 감소'),'f
 check(render([{...creditProvider,creditConfirmed:false,creditLabel:'크레딧 잔액 보유',creditDetail:null}]).includes('크레딧 잔액 보유'),'balance without observed debit is not active usage');
 check(render([{...creditProvider,windows:[...creditProvider.windows,{...weekly(),name:'Other model',remaining:0,alert:'critical'}]}]).includes('레드 얼럿'),'unbacked model warning remains visible');
 check(render([{...creditProvider,creditLabel:'<img src=x onerror=bad()>'}]).includes('&lt;img'),'credit label escaped');
+check(/\.uv-start-marker\{[^}]*height:14px[^}]*background:#7aaeff/.test(html)&&/\.uv-daily-marker\{[^}]*height:10px[^}]*background:#edf2f8/.test(html),'start and budget differ in color and height');
 check(/\.uv-limit\{[^}]*overflow-wrap:anywhere/.test(html)&&/\.uv-weekly-status\{[^}]*overflow-wrap:anywhere/.test(html),'narrow row wrapping rules present (no layout measurement)');
 render(undefined,false,'codex');
 events.click({target:{closest:()=>({dataset:{provider:'claude'}})}});
@@ -658,6 +681,10 @@ internal static class PacingProbe
         object hour = ApplyDaily(tracker, DailySnapshot(DailyStart.AddHours(1), 74), DailyStart.AddHours(1));
         Check(DailyValue(hour, "TargetPercent") == 19 && DailyValue(hour, "UsedPercent") == 2 &&
               DailyValue(hour, "RemainingPercent") == 17, "19 minus observed 2 equals 17");
+        Check((decimal)Get(Items(first).Single(), "DailyStartRemainingPercent")! == 76 &&
+              (decimal)Get(Items(early).Single(), "DailyStartRemainingPercent")! == 76 &&
+              (decimal)Get(Items(hour).Single(), "DailyStartRemainingPercent")! == 76,
+              "baseline remains the first received quota across refresh and hourly debit");
         Check(Message(hour) == "오늘 남은 권장량: 17.00%", "hourly debit visible with two decimals");
         Check((DateTimeOffset)Get(Daily(hour), "CheckedAt")! == DailyStart.AddHours(1), "internal checkpoint timestamp preserved");
         object beforeSecond = ApplyDaily(tracker, DailySnapshot(DailyStart.AddMinutes(90), 70), DailyStart.AddMinutes(90));
@@ -670,16 +697,23 @@ internal static class PacingProbe
         object restored = ApplyDaily(restarted, DailySnapshot(DailyStart.AddMinutes(130), 69), DailyStart.AddMinutes(130));
         Check(DailyValue(restored, "TargetPercent") == 19 && DailyValue(restored, "RemainingPercent") == 13,
               "restart restores baseline and checkpoint");
+        Check((decimal)Get(Items(restored).Single(), "DailyStartRemainingPercent")! == 76,
+              "restart restores the original marker instead of current quota plus checked usage");
         object recovery = ApplyDaily(restarted, DailySnapshot(DailyStart.AddHours(3), 72), DailyStart.AddHours(3));
         Check(DailyValue(recovery, "RemainingPercent") == 13, "increase does not issue another daily budget");
         object stale = ApplyDaily(restarted, DailySnapshot(DailyStart.AddHours(4), 65), DailyStart.AddHours(4), stale: true);
         Check(Level(stale) == "Unavailable" && Get(Items(stale).Single(), "Daily") == null, "stale checkpoint held");
         object error = ApplyDaily(restarted, DailySnapshot(DailyStart.AddHours(4), 65), DailyStart.AddHours(4), error: "failed");
         Check(Level(error) == "Unavailable", "failed checkpoint held");
+        Check(Get(Items(stale).Single(), "DailyStartRemainingPercent") == null &&
+              Get(Items(error).Single(), "DailyStartRemainingPercent") == null,
+              "held advice does not expose a successful baseline");
         object recovered = ApplyDaily(restarted, DailySnapshot(DailyStart.AddHours(4), 65), DailyStart.AddHours(4));
         Check(DailyValue(recovered, "RemainingPercent") == 8, "error did not reset daily target");
         object independent = ApplyDaily(restarted, DailySnapshot(DailyStart.AddHours(4), 65), DailyStart.AddHours(4), "claude");
         Check(DailyValue(independent, "UsedPercent") == 0, "providers do not share budgets");
+        Check((decimal)Get(Items(independent).Single(), "DailyStartRemainingPercent")! == 65,
+              "providers keep independent first-receipt markers");
         object oldReceipt = DailySnapshot(DailyStart.AddHours(4).AddMinutes(-1), 64);
         Check(Level(ApplyDaily(restarted, oldReceipt, DailyStart.AddHours(4))) == "Unavailable", "receipt regression held");
         object over = ApplyDaily(restarted, DailySnapshot(DailyStart.AddHours(5), 50), DailyStart.AddHours(5));
@@ -1070,6 +1104,8 @@ internal static class PacingProbe
                 Check(Math.Abs(row.GetProperty("dailyBoundaryRemaining").GetDouble() -
                       (74 - (double)DailyValue(dailyAdvice, "RemainingPercent"))) < 0.000001,
                       "daily marker subtracts allowance from actual quota");
+                Check(row.GetProperty("dailyStartRemaining").GetDecimal() == 76,
+                      "popup serializes the saved daily start independently of current quota");
             }
             object tomorrowTracker = New("Services.DailyUsageAllowanceTracker", Path.Combine(_root, "tomorrow-render.json"));
             object tomorrowFirst = Snapshot(DailyStart,
@@ -1967,6 +2003,7 @@ internal static class PacingProbe
                     Check(await ScriptBool(browser, "document.body.innerText.includes('오늘 남은 권장량: 17.00%') && !document.body.innerText.includes('오늘 권장 19.00%') && !document.body.innerText.includes('확인 사용') && !document.body.innerText.includes('다음 확인')"), "hourly daily allowance rendered " + width);
                     Check(await ScriptBool(browser, "document.documentElement.scrollWidth<=innerWidth && [...document.querySelectorAll('.uv-limit')].every(e=>e.scrollWidth<=e.clientWidth+1)"), "daily allowance rows fit " + width);
                     Check(await ScriptBool(browser, "[...document.querySelectorAll('.uv-daily-marker')].length===" + (both ? "2" : "1") + " && [...document.querySelectorAll('.uv-daily-marker')].every(m=>{const t=m.parentElement.getBoundingClientRect(),r=m.getBoundingClientRect();return Math.abs((r.left+r.width/2-t.left)/t.width*100-parseFloat(m.style.left))<0.1 && r.height===10})"), "daily marker position and height " + width);
+                    Check(await ScriptBool(browser, "document.querySelectorAll('.uv-start-marker').length===" + (both ? "2" : "1") + " && [...document.querySelectorAll('.uv-start-marker')].every(m=>{const t=m.parentElement.getBoundingClientRect(),r=m.getBoundingClientRect();return Math.abs((r.left+r.width/2-t.left)/t.width*100-parseFloat(m.style.left))<0.1 && r.height===14}) && document.body.innerText.includes('오늘 시작 76%')"), "daily start marker and legend " + width);
                     if(both) Check(await ScriptBool(browser, "document.body.innerText.includes('오늘 남은 권장량: 12.46%') && document.body.innerText.includes('100%')"), "independent Claude daily allowance and five hour quota rendered");
                 }
                 await browser.ExecuteScriptAsync("window.tomorrowFixture=" + _tomorrowDocument + ";tomorrowFixture.providers.forEach(p=>{p.stale=false;p.windows.forEach(w=>w.expired=false)});");

@@ -363,6 +363,10 @@ internal sealed class UsagePopup : Form
                         pacingItem?.Reason == null && pacingItem?.Daily != null &&
                         pacingItem.Level is UsagePacingLevel.Recommended or UsagePacingLevel.UntilReset ?
                         Math.Clamp(window.RemainingPercent - (double)pacingItem.Daily.RemainingPercent, 0, 100) : null;
+                    decimal? dailyStartRemaining = valid == true && window.DurationMinutes == 10080 &&
+                        pacingItem?.Reason == null && pacingItem?.Daily != null &&
+                        pacingItem.Level is UsagePacingLevel.Recommended or UsagePacingLevel.UntilReset or
+                                            UsagePacingLevel.Exhausted ? pacingItem.DailyStartRemainingPercent : null;
                     bool creditBacked = creditUsage?.HasBalance == true && creditUsage.BucketId == bucket.Id;
                     string? weeklyMessage = window.DurationMinutes == 10080 && pacingItem != null ?
                                             UsageDisplayHelper.GetWeeklyMessage(pacingItem) : null;
@@ -384,6 +388,7 @@ internal sealed class UsagePopup : Form
                         weekly = window.DurationMinutes == 10080,
                         average24Hours = pacingItem?.Average24Hours,
                         dailyBoundaryRemaining,
+                        dailyStartRemaining,
                         creditBacked,
                         pacingReason = pacingItem?.Reason,
                         pacingMessage = weeklyMessage,
