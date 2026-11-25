@@ -44,7 +44,7 @@ const responseEvent = block(connection, 'private void OnResponse', 'private void
 const newRoute = block(connection, 'private static bool IsNewPage', 'private static ClaudeRefreshRoute GetRefreshRoute');
 check(/IsOfficial\(url, out Uri uri\) == true &&\s*uri.AbsolutePath == "\/new" && uri.Query.Length == 0;/.test(newRoute) &&
     routeChange.includes('IsNewPage(url) == true') &&
-    routeChange.includes('_documentUrl == UsageUrl') && routeChange.includes('_documentFrame') &&
+    routeChange.includes('_documentUrl == UsageUrl') && routeChange.includes('url != UsagePanelUrl') && routeChange.includes('_documentFrame') &&
     routeChange.includes('Visible == true') && routeChange.includes('ClaudeRefreshTrigger.Automatic or ClaudeRefreshTrigger.Manual') &&
     routeChange.includes('_refresh.Accepts(pageAttempt.Attempt)'), 'only hidden app attempts can recover from the exact same-document move');
 check(routeChange.includes('request.DocumentUrl == UsageUrl') && !routeChange.includes('.Query') &&
@@ -52,6 +52,9 @@ check(routeChange.includes('request.DocumentUrl == UsageUrl') && !routeChange.in
     requestEvent.includes('pageAttempt.Draining == false') && requestEvent.includes('!= "GET"') &&
     requestEvent.includes('IsUsageEndpoint(url) == false') && requestEvent.includes('IsUsagePage(documentUrl) == false') &&
     connection.includes('string.IsNullOrEmpty(args.SessionId) == false'), 'freeze pre-registered top-session GETs with or without a query');
+check(routeChange.includes('url == UsagePanelUrl') && routeChange.includes('fromUsage == true') &&
+    requestEvent.includes('_refreshRoute == ClaudeRefreshRoute.UsagePanel') && requestEvent.includes('documentUrl is NewPageUrl or UsagePanelUrl') &&
+    requestEvent.includes('loader == _documentLoader && frame == _documentFrame'), 'accept post-transition GETs from the bound settings tab');
 check(requestEvent.includes('new ClaudePageRequest(id, loader, frame, url!)') && responseEvent.includes('FindRequest(item)') &&
     connection.includes('Requests.Find(request => request.Id == id)') && responseEvent.includes('ReadString(response, "url") != request.Url') &&
     responseEvent.includes('ReadString(item, "loaderId") != request.Loader') && responseEvent.includes('frame != request.Frame'),

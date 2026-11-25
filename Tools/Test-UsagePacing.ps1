@@ -1541,6 +1541,42 @@ internal static class PacingProbe
             await VerifyRefresh(33, bootstrap: false);
             string previousCache = await VerifyRefresh(44, bootstrap: true);
 
+            const string usagePanel = "/new#settings/usage";
+            foreach (string trigger in new[] { "Automatic", "Manual", "Connection" })
+            {
+                clock.Advance(60);
+                if (trigger == "Connection") { window.Show(); }
+                await NavigateUsage(trigger);
+                await SameDocument(usagePanel);
+                Check(Active() && File.ReadAllText(cachePath) == previousCache,
+                    "opening the usage panel waits for its first GET and preserves the cache");
+                used++;
+                int before = successes;
+                Task<string> reply = await HoldUsageReply(url: origin + endpoint + usageQuery);
+                releaseReply.SetResult(true);
+                Check(await reply == "200", "the usage panel receives its own query response");
+                await AwaitAttemptEnd();
+                string saved = File.ReadAllText(cachePath);
+                Check(Result() == "Success" && successes == before + 1 && saved != previousCache &&
+                    saved.Contains($"\"UsedPercent\":{used}") && !saved.Contains("fixture_private"),
+                    "the GET issued after the settings tab opens commits once for " + trigger);
+                previousCache = saved;
+                if (trigger == "Connection") { window.Hide(); }
+            }
+
+            await NavigateUsage();
+            await SameDocument(usagePanel);
+            Task<string> abandonedPanel = await HoldUsageReply(url: origin + endpoint + usageQuery);
+            await SameDocument("/new#settings/profile");
+            releaseReply.SetResult(true);
+            Check(await abandonedPanel == "200", "the abandoned panel's delayed response arrives");
+            CheckCacheUnchanged(previousCache, "NavigationFailed");
+
+            redirect = origin + usagePanel;
+            await Navigate(Refresh, new Uri(redirect));
+            await Receive();
+            CheckCacheUnchanged(previousCache, "NavigationFailed", "a direct landing on /new has no verified usage transition");
+
             foreach ((string trigger, string path, string query) in new[]
             {
                 ("Manual", "/new", ""), ("Automatic", "/new", ""),
