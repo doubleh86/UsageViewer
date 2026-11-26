@@ -9,7 +9,7 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
 .uv-window.uv-docked{border-top:0;border-radius:0 0 12px 12px;padding-top:12px}
 .uv-limits{font-size:10px;color:#a8b5c6;margin:0 0 7px;overflow-wrap:anywhere}
 .uv-track.uv-low>span{background:#f88b98}.uv-track.uv-critical>span{background:#ff697e}.uv-alert-note{margin:7px 0;padding:6px 8px;border-radius:5px;background:#3d202a;color:#ffbdc5;font-size:11px;overflow-wrap:anywhere}.uv-alert-note.uv-critical{background:#5c2430;color:#ffd8dd}
-.uv-weekly-status{margin-top:6px;font-size:11px;overflow-wrap:anywhere}.uv-help{margin-top:10px;color:#a8b5c6;font-size:11px;overflow-wrap:anywhere}.uv-help summary{cursor:pointer;min-height:26px;line-height:26px}.uv-help summary:focus-visible{outline:2px solid #73dec1}.uv-help p{margin:3px 0 0}.uv-limit{margin-top:12px;overflow-wrap:anywhere}.uv-limit:first-child{margin-top:0}
+.uv-weekly-status{margin-top:6px;font-size:11px;overflow-wrap:anywhere}.uv-custom-reset{color:#a9ceff}.uv-help{margin-top:10px;color:#a8b5c6;font-size:11px;overflow-wrap:anywhere}.uv-help summary{cursor:pointer;min-height:26px;line-height:26px}.uv-help summary:focus-visible{outline:2px solid #73dec1}.uv-help p{margin:3px 0 0}.uv-limit{margin-top:12px;overflow-wrap:anywhere}.uv-limit:first-child{margin-top:0}
 .uv-provider-status{margin:0 0 8px;overflow-wrap:anywhere}.uv-provider-status .uv-connect{display:block}
 .uv-track{position:relative;overflow:visible}.uv-track>span{border-radius:2px}.uv-daily-marker{position:absolute;left:0;top:-3px;width:2px;height:10px;background:#edf2f8;border-radius:1px;transform:translateX(-50%);box-shadow:0 0 0 1px #171d25}
 .uv-credit-confirmed{color:#7aaeff}.uv-credit-detail{color:#a8b5c6;font-size:11px;margin-top:3px;overflow-wrap:anywhere}.uv-credit-notice{margin:7px 0;padding:6px 8px;border-radius:5px;background:#202c3b;color:#c2d8f6;font-size:11px;overflow-wrap:anywhere}.uv-credit-notice.uv-credit-confirmed{background:#172d4c;color:#a9ceff}
@@ -90,7 +90,9 @@ footer{font-size:11px;color:#a8b5c6;border-top:1px solid #303946;padding-top:10p
   }
   if(w.shortTermWarning)html+='<div class="uv-warning">'+esc(w.shortTermWarning)+'</div>';
   if(!w.weekly&&w.pacingReason)html+='<div class="uv-warning">'+esc(w.pacingReason)+'</div>';
-  return html+'<div class="uv-small uv-muted">'+esc(w.resetText)+'</div></div>';
+  const custom=p.id==='codex'&&w.weekly&&!w.invalid&&!w.expired&&!p.stale&&!p.error&&w.customResetText;
+  if(custom)html+='<div class="uv-small uv-custom-reset">'+esc(custom)+'</div>';
+  return html+'<div class="uv-small uv-muted">'+(custom?'서버 기준 · ':'')+esc(w.resetText)+'</div></div>';
  }
  function usage(p,large){
   let html=p.web&&p.status?'<div class="uv-warning uv-provider-status">'+(p.previous?'이전 값 · ':'')+esc(p.status)+(p.canConnect?'<button type="button" class="uv-connect" data-action="connect" data-id="claude">연결 창 열기</button>':'')+'</div>':'';

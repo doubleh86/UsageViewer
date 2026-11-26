@@ -149,13 +149,18 @@ internal sealed class DailyUsageAllowanceTracker
                         }
                     }
 
+                    // Keep the server cycle and its hourly checkpoint when a planning date is edited.
+                    DateTimeOffset planningReset = item.CustomResetAt ?? entry.ResetsAt;
+                    decimal todayTarget = item.CustomResetAt != null ?
+                        DailyAllowanceHelper.CalculateTarget(entry.BaselineRemaining, entry.StartedAt, planningReset, zone) :
+                        entry.Target;
                     decimal used = Math.Max(0, entry.BaselineRemaining - entry.CheckedRemaining);
-                    decimal todayRemaining = Math.Min(remaining, Math.Max(0, entry.Target - used));
+                    decimal todayRemaining = Math.Min(remaining, Math.Max(0, todayTarget - used));
                     decimal? tomorrow = DailyAllowanceHelper.CalculateTomorrowEstimate(remaining, todayRemaining,
-                                                                                       now, entry.ResetsAt, zone);
+                                                                                       now, planningReset, zone);
                     weekly.Add(item with
                     {
-                        Daily = new DailyUsageAllowance(entry.Target, used, todayRemaining,
+                        Daily = new DailyUsageAllowance(todayTarget, used, todayRemaining,
                                                        entry.StartedAt, entry.CheckedAt),
                         TomorrowEstimatePercent = tomorrow,
                         DailyStartRemainingPercent = entry.BaselineRemaining

@@ -12,7 +12,8 @@ internal sealed record UsagePacingItem(string BucketId, string? BucketName, Usag
                                        UsagePacingLevel Level, decimal? Average24Hours = null,
                                        string? Reason = null, DailyUsageAllowance? Daily = null,
                                        decimal? TomorrowEstimatePercent = null,
-                                       decimal? DailyStartRemainingPercent = null);
+                                       decimal? DailyStartRemainingPercent = null,
+                                       DateTimeOffset? CustomResetAt = null);
 
 internal sealed record DailyUsageAllowance(decimal TargetPercent, decimal UsedPercent, decimal RemainingPercent,
                                            DateTimeOffset StartedAt, DateTimeOffset CheckedAt);

@@ -186,6 +186,19 @@ internal sealed class UsagePopup : Form
         UpdateDocument();
     }
 
+    public bool TrySetCodexWeeklyReset(CodexWeeklyResetOverride? reset)
+    {
+        PopupPreferences preferences = _preferences with { CodexWeeklyReset = reset };
+        if (_preferencesStore.Save(preferences) == false)
+        {
+            return false;
+        }
+
+        _preferencesError = null;
+        _preferences = preferences;
+        return true;
+    }
+
     public void CloseForExit()
     {
         _allowClose = true;
@@ -419,6 +432,8 @@ internal sealed class UsagePopup : Form
                                 UsageAlertPolicy.GetLevel(window, DateTimeOffset.UtcNow).ToString().ToLowerInvariant() : "none",
                         expired = UsageDisplayHelper.IsExpired(window),
                         resetText = UsageDisplayHelper.FormatReset(window),
+                        customResetText = pacingItem?.CustomResetAt is DateTimeOffset customReset ?
+                                          $"사용자 지정 · {customReset.ToLocalTime():MM/dd HH:mm}" : null,
                         weekly = window.DurationMinutes == 10080,
                         average24Hours = pacingItem?.Average24Hours,
                         dailyBoundaryRemaining,

@@ -91,6 +91,16 @@ for(const flag of ['stale','error']){
     check(!render([{...provider('codex',[{...weekly(),dailyStartRemaining:48}]),[flag]:true}]).includes('class="uv-start-marker"'),'failed provider hides baseline '+flag);
 }
 check(!render([provider('codex',[{...weekly(),weekly:false,dailyStartRemaining:48}])]).includes('class="uv-start-marker"'),'short limit has no daily baseline');
+const custom = {...weekly(),customResetText:'사용자 지정 · 11/12 09:00'};
+for(const both of [true,false]){
+    const markup=render([provider('codex',[custom])],both,'codex',!both);
+    check(markup.includes('uv-custom-reset">사용자 지정 · 11/12 09:00')&&markup.includes('서버 기준 · '+custom.resetText),
+        'planning date and actual reset are visible together');
+}
+check(!render([provider('claude',[custom])]).includes('사용자 지정'),'Claude has no Codex planning date');
+check(!render([provider('codex',[{...custom,weekly:false}])]).includes('사용자 지정'),'five-hour window has no custom date');
+check(!render([provider('codex',[{...custom,expired:true}])]).includes('사용자 지정'),'expired window has no custom date');
+check(!render([{...provider('codex',[custom]),error:'fixture'}]).includes('사용자 지정'),'unavailable quota has no custom date');
 const coincident=render([provider('codex',[{...weekly(),remaining:48,dailyStartRemaining:48,dailyBoundaryRemaining:48}])]);
 check(coincident.includes('class="uv-start-marker"')&&coincident.includes('class="uv-daily-marker"'),'coincident markers both retained');
 const creditProvider={...provider('codex',[{...weekly('주간 한도 소진 · 크레딧 잔액 보유',''),remaining:0,alert:'critical',creditBacked:true}]),credits:'62,000.25',creditLabel:'크레딧 차감 확인',creditConfirmed:true,creditDetail:'최근 조회보다 68.44 감소'};
@@ -189,6 +199,7 @@ internal static class PacingProbe
                 CheckDailyFormula();
                 CheckTomorrowGuidance();
                 CheckCreditUsage();
+                CheckCustomReset();
             }
             CheckClaudeRefresh();
             CheckPresentation();
@@ -725,8 +736,8 @@ internal static class PacingProbe
         Check(!File.Exists(Path.Combine(path, "not-a-directory.json")), "diagnostic storage errors remain best-effort");
     }
     private static object Evaluate(object? snapshot, DateTimeOffset? now = null, string? error = null,
-                                   bool stale = false) =>
-        Static("Services.UsagePacingAdvisor", "Evaluate", snapshot, error, stale, now ?? Start);
+                                   bool stale = false, object? customReset = null) =>
+        Static("Services.UsagePacingAdvisor", "Evaluate", snapshot, error, stale, now ?? Start, customReset);
     private static object[] Items(object advice, string property = "Weekly") =>
         ((IEnumerable?)Get(advice, property))?.Cast<object>().ToArray() ?? [];
     private static decimal? Average(object advice) => (decimal?)Get(Items(advice).Single(), "Average24Hours");
@@ -917,7 +928,7 @@ internal static class PacingProbe
                 buckets.SetValue(bucket, 0);
                 object snapshot = Activator.CreateInstance(fresh.GetType("UsageViewer.Models.UsageSnapshot", true)!, "synthetic", buckets, Start)!;
                 object advice = fresh.GetType("UsageViewer.Services.UsagePacingAdvisor", true)!.GetMethod("Evaluate")!
-                    .Invoke(null, [snapshot, null, false, Start])!;
+                    .Invoke(null, [snapshot, null, false, Start, null])!;
                 string result = (string)fresh.GetType("UsageViewer.UI.UsageDisplayHelper", true)!.GetMethod("FormatPacingDetails")!
                     .Invoke(null, [advice])!;
                 Check(result == expected, "fresh assembly restart same pure calculation");
@@ -938,6 +949,70 @@ internal static class PacingProbe
     private static object Daily(object advice) => Get(Items(advice).Single(), "Daily")!;
     private static decimal DailyValue(object advice, string property) => (decimal)Get(Daily(advice), property)!;
     private static void SaveDaily(object tracker) => ((Task)Invoke(tracker, "SaveAsync")).GetAwaiter().GetResult();
+
+    private static void CheckCustomReset()
+    {
+        DateTimeOffset official = DailyStart.AddDays(4);
+        DateTimeOffset planned = DailyStart.AddDays(2);
+        DateTimeOffset checkedAt = DailyStart.AddHours(1);
+        object Override(DateTimeOffset date, string? scope = null) =>
+            New("Models.CodexWeeklyResetOverride", official, date, scope);
+        object custom = Override(planned);
+        object Quota(DateTimeOffset at, double remaining, DateTimeOffset reset) =>
+            Snapshot(at, Bucket("codex", Window(remaining, 10080, reset)));
+        string historyPath = Path.Combine(_root, "custom-reset-allowance.json");
+        object tracker = New("Services.DailyUsageAllowanceTracker", historyPath);
+        TimeZoneInfo zone = TimeZoneInfo.CreateCustomTimeZone("Custom+9", TimeSpan.FromHours(9), "fixture", "fixture");
+        object Advice(object snapshot, DateTimeOffset at, object? reset) =>
+            Invoke(tracker, "Apply", "codex", snapshot, Evaluate(snapshot, at, customReset: reset), at, zone);
+
+        Advice(Quota(DailyStart, 35, official), DailyStart, null);
+        object current = Quota(checkedAt, 34, official);
+        object original = Advice(current, checkedAt, null);
+        object adjusted = Advice(current, checkedAt, custom);
+        object item = Items(adjusted).Single();
+        Check(DailyValue(original, "RemainingPercent") == 7.75m && DailyValue(adjusted, "RemainingPercent") == 16.5m,
+              "earlier planned reset increases today's remaining allocation");
+        Check((decimal)Get(item, "DailyStartRemainingPercent")! == 35m && DailyValue(adjusted, "UsedPercent") == 1m &&
+              (double)Get(Get(item, "Window")!, "RemainingPercent")! == 34 &&
+              (DateTimeOffset)Get(Get(item, "Window")!, "ResetsAt")! == official,
+              "custom reset preserves actual quota, cycle and daily checkpoint");
+        Check(Tomorrow(adjusted) == 17.5m && (DateTimeOffset)Get(item, "CustomResetAt")! == planned,
+              "tomorrow follows the planning deadline");
+        SaveDaily(tracker);
+        tracker = New("Services.DailyUsageAllowanceTracker", historyPath);
+        Check(DailyValue(Advice(current, checkedAt, custom), "RemainingPercent") == 16.5m &&
+              DailyValue(Advice(current, checkedAt, null), "RemainingPercent") == 7.75m,
+              "restart and clear reuse the original checkpoint");
+        foreach (object advice in new[] { Evaluate(current, checkedAt, customReset: Override(checkedAt)),
+            Evaluate(Quota(checkedAt, 90, official.AddDays(1)), checkedAt, customReset: custom),
+            Evaluate(current, checkedAt, customReset: Override(planned, "other-account")),
+            Evaluate(current, checkedAt, "fixture error", customReset: custom) })
+        {
+            Check(Get(Items(advice).Single(), "CustomResetAt") == null, "expired, mismatched or unavailable cycle ignores override");
+        }
+        object multiple = Snapshot(checkedAt, Bucket("codex", Window(70, 300, official), Window(34, 10080, official)),
+                                   Bucket("other-model", Window(20, 10080, official)));
+        object limited = Evaluate(multiple, checkedAt, customReset: custom);
+        Check(Items(limited).Count(item => Get(item, "CustomResetAt") != null) == 1 &&
+              (string)Get(Items(limited).Single(item => Get(item, "CustomResetAt") != null), "BucketId")! == "codex" &&
+              Get(Items(limited, "ShortTerm").Single(), "CustomResetAt") == null, "only the default Codex weekly window changes");
+
+        object store = New("Services.PopupPreferencesStore", Path.Combine(_root, "custom-reset-view.json"));
+        using Form popup = (Form)New("UI.UsagePopup", store, Path.Combine(_root, "custom-reset-profile"));
+        Invoke(popup, "SetAlertSoundEnabled", false);
+        Check((bool)Invoke(popup, "TrySetCodexWeeklyReset", custom), "custom setting saved with existing preferences");
+        object reloaded = Invoke(store, "Load");
+        Check(Equals(Get(reloaded, "CodexWeeklyReset"), custom) && !(bool)Get(reloaded, "AlertSoundEnabled")!,
+              "date round trip preserves neighboring preferences");
+        Invoke(popup, "SetState", current, false, null, null, null, false, adjusted, null, null);
+        using JsonDocument data = JsonDocument.Parse(JsonSerializer.Serialize(Invoke(popup, "BuildDocumentState")));
+        JsonElement window = data.RootElement.GetProperty("providers")[0].GetProperty("windows")[0];
+        Check(window.GetProperty("customResetText").GetString() == $"사용자 지정 · {planned.ToLocalTime():MM/dd HH:mm}" &&
+              window.GetProperty("remaining").GetDouble() == 34, "detail payload keeps real percent beside custom date");
+        Check((bool)Invoke(popup, "TrySetCodexWeeklyReset", (object?)null) &&
+              Get(Invoke(store, "Load"), "CodexWeeklyReset") == null, "clear persists across restart");
+    }
 
     private static void CheckDailyAllowance()
     {
@@ -2272,13 +2347,14 @@ internal static class PacingProbe
                 Check(await ScriptBool(browser, "document.body.innerText.includes('0.1% 미만 남음') && !document.querySelector('.uv-limit:last-of-type strong').innerText.startsWith('0%')"), "tiny actual remainder not rendered as zero");
                 await browser.ExecuteScriptAsync("fixture.providers[1].windows[1].pacingMessage='추천 페이스 보류 · 잔여량 확인 필요';fixture.providers[1].windows[1].pacingReason='잔여량 확인 필요';fixture.providers[1].windows[1].invalid=true;usageViewer.update(fixture);");
                 Check(await ScriptBool(browser, "document.body.innerText.includes('추천 페이스 보류 · 잔여량 확인 필요') && !document.body.innerText.includes('약0%')"), "rendered invalid advice held with reason");
-                await browser.ExecuteScriptAsync("window.dailyFixture=" + _dailyDocument + ";dailyFixture.providers.forEach(p=>{p.stale=false;p.windows.forEach(w=>w.expired=false)});");
+                await browser.ExecuteScriptAsync("window.dailyFixture=" + _dailyDocument + ";dailyFixture.providers.forEach(p=>{p.stale=false;p.windows.forEach(w=>w.expired=false)});const customWeek=dailyFixture.providers.find(p=>p.id==='codex').windows.find(w=>w.weekly);customWeek.customResetText='사용자 지정 · 11/12 09:00';customWeek.resetText='4일 3시간 후 초기화 · 11/13 00:00';");
                 foreach ((int width, bool both, bool docked) in new[] { (264, false, true), (280, false, false), (320, true, false) })
                 {
                     host.ClientSize = new Size(width, 1000);
                     await browser.ExecuteScriptAsync($"dailyFixture.showBoth={both.ToString().ToLowerInvariant()};dailyFixture.docked={docked.ToString().ToLowerInvariant()};dailyFixture.activeProvider='codex';usageViewer.update(dailyFixture);");
                     Check(await ScriptBool(browser, "document.body.innerText.includes('오늘 남은 권장량: 17.00%') && !document.body.innerText.includes('오늘 권장 19.00%') && !document.body.innerText.includes('확인 사용') && !document.body.innerText.includes('다음 확인')"), "hourly daily allowance rendered " + width);
                     Check(await ScriptBool(browser, "document.documentElement.scrollWidth<=innerWidth && [...document.querySelectorAll('.uv-limit')].every(e=>e.scrollWidth<=e.clientWidth+1)"), "daily allowance rows fit " + width);
+                    Check(await ScriptBool(browser, "document.querySelectorAll('.uv-custom-reset').length===1 && document.querySelector('.uv-custom-reset').innerText==='사용자 지정 · 11/12 09:00' && document.querySelector('.uv-custom-reset').nextElementSibling.innerText==='서버 기준 · 4일 3시간 후 초기화 · 11/13 00:00'"), "custom and official date fit together " + width);
                     Check(await ScriptBool(browser, "[...document.querySelectorAll('.uv-daily-marker')].length===" + (both ? "2" : "1") + " && [...document.querySelectorAll('.uv-daily-marker')].every(m=>{const t=m.parentElement.getBoundingClientRect(),r=m.getBoundingClientRect();return Math.abs((r.left+r.width/2-t.left)/t.width*100-parseFloat(m.style.left))<0.1 && r.height===10})"), "daily marker position and height " + width);
                     Check(await ScriptBool(browser, "document.querySelectorAll('.uv-start-marker').length===" + (both ? "2" : "1") + " && [...document.querySelectorAll('.uv-start-marker')].every(m=>{const t=m.parentElement.getBoundingClientRect(),r=m.getBoundingClientRect();return Math.abs((r.left+r.width/2-t.left)/t.width*100-parseFloat(m.style.left))<0.1 && r.height===14}) && document.body.innerText.includes('오늘 시작 76%')"), "daily start marker and legend " + width);
                     if(both) Check(await ScriptBool(browser, "document.body.innerText.includes('오늘 남은 권장량: 12.46%') && document.body.innerText.includes('100%')"), "independent Claude daily allowance and five hour quota rendered");

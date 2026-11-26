@@ -54,6 +54,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _popup.SetDetectedApps(_installed);
         _menu.Items.Add("사용량 보기", null, (_, _) => ShowPopup(_lastTrayAnchor ?? Cursor.Position));
         _menu.Items.Add("새로고침", null, async (_, _) => await RequestRefreshAsync());
+        _menu.Items.Add("Codex 주간 초기화 시간 설정…", null, (_, _) => EditCodexWeeklyReset());
         _menu.Items.Add("Codex 구독 연결 / 계정 확인", null, async (_, _) => await ConnectCodexAsync());
         _menu.Items.Add("Claude 구독 연결 / 계정 확인", null, async (_, _) => await ConnectClaudeAsync());
         _menu.Items.Add(new ToolStripSeparator());
@@ -397,6 +398,50 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
+    private void EditCodexWeeklyReset()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        DateTimeOffset? serverReset = GetCodexWeeklyReset(now);
+        string? accountScope = _snapshot?.CreditAccountScope;
+        CodexWeeklyResetOverride? saved = _popup.Preferences.CodexWeeklyReset;
+        DateTimeOffset? planned = saved?.ServerResetAt == serverReset && saved?.AccountScope == accountScope ?
+                                  saved?.PlannedResetAt : null;
+        using CodexWeeklyResetDialog dialog = new CodexWeeklyResetDialog(serverReset, planned, saved != null, Save);
+        dialog.ShowDialog();
+
+        string? Save(DateTimeOffset? date)
+        {
+            CodexWeeklyResetOverride? setting = null;
+            if (date is DateTimeOffset plannedResetAt)
+            {
+                DateTimeOffset currentTime = DateTimeOffset.UtcNow;
+                if (plannedResetAt <= currentTime)
+                {
+                    return "현재보다 뒤의 날짜와 시간을 선택해 주세요.";
+                }
+                if (serverReset is not DateTimeOffset expected || GetCodexWeeklyReset(currentTime) != expected ||
+                    _snapshot?.CreditAccountScope != accountScope)
+                {
+                    return "주간 한도 정보가 바뀌었어요. 창을 닫고 다시 열어 주세요.";
+                }
+                setting = new CodexWeeklyResetOverride(expected, plannedResetAt, accountScope);
+            }
+
+            if (_popup.TrySetCodexWeeklyReset(setting) == false)
+            {
+                return "초기화 시간 설정을 저장하지 못했어요.";
+            }
+            UpdatePopup();
+            return null;
+        }
+    }
+
+    private DateTimeOffset? GetCodexWeeklyReset(DateTimeOffset now)
+    {
+        UsagePacingAdvice advice = UsagePacingAdvisor.Evaluate(_snapshot, _error, false, now);
+        return advice.Weekly?.FirstOrDefault(item => item.BucketId == "codex" && item.Reason == null)?.Window.ResetsAt;
+    }
+
     private void UpdatePopup()
     {
         if (_exiting == true)
@@ -409,7 +454,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         ClaudeUsageDisplay? claudeWeb = GetClaudeDisplay(now);
         string? claudeError = _claudeWebSelected == true ? null : _claudeCodeError;
         bool claudeStale = IsClaudeStale(claudeSnapshot, claudeWeb, now);
-        UsagePacingAdvice codex = UsagePacingAdvisor.Evaluate(_snapshot, _error, false, now);
+        UsagePacingAdvice codex = UsagePacingAdvisor.Evaluate(_snapshot, _error, false, now,
+                                                             _popup.Preferences.CodexWeeklyReset);
         UsagePacingAdvice claude = UsagePacingAdvisor.Evaluate(claudeSnapshot, claudeError, claudeStale, now);
         TimeZoneInfo zone = TimeZoneInfo.Local;
         codex = _dailyAllowances.Apply("codex", _snapshot, codex, now, zone);

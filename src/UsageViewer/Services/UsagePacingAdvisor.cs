@@ -4,7 +4,8 @@ namespace UsageViewer.Services;
 
 internal static class UsagePacingAdvisor
 {
-    public static UsagePacingAdvice Evaluate(UsageSnapshot? snapshot, string? error, bool stale, DateTimeOffset now)
+    public static UsagePacingAdvice Evaluate(UsageSnapshot? snapshot, string? error, bool stale, DateTimeOffset now,
+                                             CodexWeeklyResetOverride? codexReset = null)
     {
         string? reason = snapshot == null ? "사용량 미수신" :
                          error != null ? "조회 실패 · 새로고침 필요" :
@@ -29,10 +30,17 @@ internal static class UsagePacingAdvisor
                 }
 
                 decimal? average = null;
+                DateTimeOffset? customResetAt = null;
                 UsagePacingLevel level = UsagePacingLevel.Unavailable;
                 if (invalid == null && isWeekly == true)
                 {
-                    DateTimeOffset reset = window.ResetsAt!.Value;
+                    if (codexReset != null && bucket.Id == "codex" && window.ResetsAt == codexReset.ServerResetAt &&
+                        codexReset.PlannedResetAt > now && snapshot!.CreditAccountScope == codexReset.AccountScope)
+                    {
+                        customResetAt = codexReset.PlannedResetAt;
+                    }
+
+                    DateTimeOffset reset = customResetAt ?? window.ResetsAt!.Value;
                     TimeSpan remainingTime = reset - now;
                     // Subtract in decimal so a received 99.7 does not move the 0.15 rounding boundary.
                     decimal remaining = 100m - (decimal)window.UsedPercent;
@@ -47,7 +55,8 @@ internal static class UsagePacingAdvisor
                 }
 
                 UsagePacingItem item = new UsagePacingItem(bucket.Id,
-                    snapshot!.Buckets.Count > 1 ? bucket.Name : null, window, level, average, invalid);
+                    snapshot!.Buckets.Count > 1 ? bucket.Name : null, window, level, average, invalid,
+                    CustomResetAt: customResetAt);
                 (isWeekly == true ? weekly : shortTerm).Add(item);
             }
         }
